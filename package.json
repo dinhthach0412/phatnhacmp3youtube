@@ -1,0 +1,17 @@
+{
+  "name": "zing-server-esp32",
+  "version": "1.0.0",
+  "description": "API Music for ESP32",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "zingmp3-api-full": "latest",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
