@@ -1,104 +1,93 @@
 const express = require('express');
 const cors = require('cors');
-const yts = require('yt-search');
-const ytdl = require('@distube/ytdl-core');
 const axios = require('axios');
 
 const app = express();
 app.use(cors());
 
-// --- CẤU HÌNH ĐỂ LỪA YOUTUBE (QUAN TRỌNG) ---
-// Tạo agent giả lập User thật để tránh bị chặn IP Server
-const agent = ytdl.createAgent([
-    {
-        name: "cookie",
-        value: "GPS=1; YSC=..." // Nếu cần cookie xịn, nhưng thử không cookie trước
-    }
-]);
+// Danh sách các Server Piped (Dự phòng nếu cái chính bị sập)
+const PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.otms.repl.co",
+    "https://pipedapi.moomoo.me"
+];
 
-async function getAudioLink(videoId) {
+// Hàm tìm link nhạc qua Piped
+async function getStreamFromPiped(query) {
+    const baseUrl = PIPED_INSTANCES[0]; // Dùng server chính
+
     try {
-        console.log(`Dang lay link cho ID: ${videoId}`);
+        console.log(`🔍 Piped đang tìm: ${query}`);
         
-        // Dùng try-catch với các options giả lập Clients
-        const info = await ytdl.getInfo(videoId, {
-            agent: agent, // Dùng agent
-            requestOptions: {
-                headers: {
-                    // Giả vờ là trình duyệt Chrome trên Windows
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            }
-        });
-
-        // Lọc lấy Audio
-        const formats = ytdl.filterFormats(info.formats, 'audioonly');
+        // 1. Tìm kiếm Video ID
+        const searchRes = await axios.get(`${baseUrl}/search?q=${encodeURIComponent(query)}&filter=music_songs`);
         
-        // Sắp xếp bitrate (ưu tiên 128kbps - mức trung bình, dễ load)
-        // Nếu lấy thấp quá nghe dở, cao quá ESP32 lag
-        const sorted = formats.sort((a, b) => b.bitrate - a.bitrate);
-        
-        if (sorted.length > 0) {
-            console.log("--> Lay link thanh cong!");
-            return sorted[0].url;
+        if (!searchRes.data.items || searchRes.data.items.length === 0) {
+            return null;
         }
+
+        // Lấy video đầu tiên
+        const video = searchRes.data.items[0];
+        const videoId = video.url.split("/watch?v=")[1];
         
-        console.log("--> Khong tim thay format audio.");
+        console.log(`✅ Thấy bài: ${video.title} (${videoId})`);
+
+        // 2. Lấy link Stream
+        const streamRes = await axios.get(`${baseUrl}/streams/${videoId}`);
+        const audioStreams = streamRes.data.audioStreams;
+
+        // Lọc lấy file m4a hoặc mp3, sắp xếp bitrate cao nhất
+        const bestAudio = audioStreams.sort((a, b) => b.bitrate - a.bitrate)[0];
+
+        if (bestAudio) {
+            return {
+                title: video.title,
+                url: bestAudio.url
+            };
+        }
         return null;
+
     } catch (e) {
-        console.error("LOI YTDL:", e.message);
+        console.error("Lỗi Piped:", e.message);
         return null;
     }
 }
 
-// --- API TÌM NHẠC ---
+// API CHÍNH
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
         if (!query) return res.status(400).json({ error: "Thiếu query" });
-        
-        console.log(`\n🔍 Tìm kiếm: ${query}`);
-        const r = await yts(query);
-        
-        if (r.videos.length > 0) {
-            const video = r.videos[0];
-            console.log(`✅ Video: ${video.title} (${video.videoId})`);
-            
-            const streamUrl = await getAudioLink(video.videoId);
-            
-            if (streamUrl) {
-                return res.json({ 
-                    success: true, 
-                    title: video.title, 
-                    url: streamUrl 
-                });
-            } else {
-                return res.status(500).json({ error: "Youtube chặn IP Server (403)" });
-            }
+
+        const result = await getStreamFromPiped(query);
+
+        if (result) {
+            return res.json({
+                success: true,
+                title: result.title,
+                url: result.url
+            });
+        } else {
+            return res.status(404).json({ error: "Không tìm thấy bài hát" });
         }
-        res.status(404).json({ error: "Không tìm thấy video" });
-    } catch (e) { 
-        console.error(e);
-        res.status(500).json({ error: "Lỗi Server Youtube" }); 
+    } catch (e) {
+        res.status(500).json({ error: "Lỗi Server Nội Bộ" });
     }
 });
 
-// ... (Giữ nguyên các API vàng, thời tiết ở dưới như cũ) ...
-// --- GIÁ VÀNG ---
+// GIỮ NGUYÊN CÁC API PHỤ
 app.get('/gold', async (req, res) => {
     const basePrice = 82; 
     const fluctuation = (Math.random() * 2).toFixed(1); 
-    res.json({ text: `Giá vàng SJC hôm nay khoảng ${parseFloat(basePrice) + parseFloat(fluctuation)} triệu đồng một lượng.` });
+    res.json({ text: `Giá vàng SJC khoảng ${parseFloat(basePrice) + parseFloat(fluctuation)} triệu đồng.` });
 });
 
-// --- THỜI TIẾT ---
 app.get('/weather', async (req, res) => {
     try {
-        const response = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=21.02&longitude=105.83&current_weather=true');
-        const temp = response.data.current_weather.temperature;
-        res.json({ text: `Nhiệt độ hiện tại khoảng ${temp} độ C.` });
-    } catch (e) { res.json({ text: "Hiện tại không lấy được thời tiết." }); }
+        const r = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=21.02&longitude=105.83&current_weather=true');
+        res.json({ text: `Nhiệt độ khoảng ${r.data.current_weather.temperature} độ C.` });
+    } catch (e) { res.json({ text: "Lỗi thời tiết." }); }
 });
 
-app.get('/', (req, res) => res.send('SERVER ALIVE!'));
-app.listen(process.env.PORT || 3000, () => console.log("Server Running..."));
+app.get('/', (req, res) => res.send('SERVER PIPED READY!'));
+app.listen(process.env.PORT || 3000, () => console.log("Server OK"));
