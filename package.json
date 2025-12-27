@@ -1,17 +1,14 @@
 {
-  "name": "phat-nhac-youtube-server",
+  "name": "phatnhacmp3youtube",
   "version": "1.0.0",
-  "description": "Server đa năng: Phát nhạc YouTube (play-dl), giá vàng, thời tiết, coin cho ESP32",
+  "description": "Server phát nhạc ZingMP3 Việt Nam cho ESP32 (fallback radio)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "cors": "^2.8.5",
-    "yt-search": "^2.13.1",
-    "play-dl": "^1.9.7",
-    "axios": "^1.7.7"
+    "zingmp3-api-next": "^1.0.0"
   },
   "engines": {
     "node": ">=18"
