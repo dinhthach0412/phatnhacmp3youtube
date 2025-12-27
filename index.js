@@ -54,6 +54,135 @@ async function getStreamFromPiped(query) {
 }
 
 // API CHÍNH
+// 💰 API 1: XEM GIÁ COIN (Binance)
+// Gọi: /coin?symbol=BTC
+app.get('/coin', async (req, res) => {
+    try {
+        let symbol = req.query.symbol || "BTC";
+        symbol = symbol.toUpperCase();
+        
+        // Mẹo: Nếu user nói "Bitcoin" -> Chuyển thành BTC, "Ether" -> ETH
+        if (symbol === "BITCOIN") symbol = "BTC";
+        if (symbol === "ETHER" || symbol === "ETHEREUM") symbol = "ETH";
+        if (symbol === "USDT") symbol = "USDT"; // Giá USDT/VND thì hơi khó lấy chính xác trên binance quốc tế, thường lấy qua P2P, nhưng lấy tạm giá global
+
+        // Gọi Binance API (Cặp giao dịch với USDT)
+        const pair = symbol + "USDT";
+        const url = `https://api.binance.com/api/v3/ticker/price?symbol=${pair}`;
+        
+        const response = await axios.get(url);
+        const price = parseFloat(response.data.price);
+        
+        // Format giá đẹp ($95,000.00)
+        const priceStr = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price);
+        
+        res.json({ 
+            text: `Giá ${symbol} hiện tại là ${priceStr} (theo Binance).` 
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.json({ text: "Không tìm thấy giá đồng coin này trên Binance." });
+    }
+});
+
+// 💱 API 2: TỶ GIÁ NGOẠI TỆ (Dùng API Free)
+// Gọi: /currency?from=USD&to=VND
+app.get('/currency', async (req, res) => {
+    try {
+        let from = req.query.from || "USD";
+        let to = req.query.to || "VND";
+        from = from.toUpperCase();
+        to = to.toUpperCase();
+
+        // API miễn phí (cập nhật hàng ngày)
+        const url = `https://api.exchangerate-api.com/v4/latest/${from}`;
+        const response = await axios.get(url);
+        
+        const rate = response.data.rates[to];
+        if (rate) {
+            // Format số tiền (25,000)
+            const rateStr = new Intl.NumberFormat('vi-VN').format(rate);
+            res.json({ 
+                text: `1 ${from} đổi được khoảng ${rateStr} ${to}.` 
+            });
+        } else {
+            res.json({ text: `Không tìm thấy tỷ giá từ ${from} sang ${to}.` });
+        }
+
+    } catch (e) {
+        res.json({ text: "Lỗi lấy tỷ giá ngoại tệ." });
+    }
+});
+
+// ... (Giữ nguyên phần server listen ở cuối)
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server chạy port ${port}`));
+👉 Làm xong nhớ git push lên Render nhé!
+
+🛠️ BƯỚC 2: CẬP NHẬT MCP TRÊN ESP32 (mcp_server.cc)
+Bây giờ bạn thêm 2 công cụ mới vào hàm AddCommonTools trong file main/mcp_server.cc. Mình viết bằng cú pháp chuẩn (Property) để không bị lỗi build như lúc nãy.
+
+Thêm đoạn này vào trong hàm void McpServer::AddCommonTools():
+
+C++
+
+    // 🪙 CÔNG CỤ 4: GIÁ COIN (BINANCE)
+    AddTool("self.finance.coin", 
+        "Tra cứu giá tiền ảo (Crypto) từ Binance.\n"
+        "Dùng khi hỏi: 'giá bitcoin', 'eth bao nhiêu', 'giá coin hôm nay'.", 
+        PropertyList({
+            Property("symbol", kPropertyTypeString) // Ví dụ: BTC, ETH, SOL
+        }),
+        [](const PropertyList& props) -> ReturnValue {
+            std::string symbol = "BTC";
+            if (props.has("symbol")) symbol = props["symbol"].value<std::string>();
+
+            // Gọi Server Nodejs
+            std::string resp = call_api_get("/coin?symbol=" + symbol);
+            
+            cJSON* json = cJSON_Parse(resp.c_str());
+            std::string text = "Lỗi mạng coin.";
+            if (json) {
+                cJSON* t = cJSON_GetObjectItem(json, "text");
+                if (t) text = t->valuestring;
+                cJSON_Delete(json);
+            }
+            return "{\"result\": \"" + text + "\"}";
+        });
+
+    // 💵 CÔNG CỤ 5: TỶ GIÁ NGOẠI TỆ
+    AddTool("self.finance.currency", 
+        "Tra cứu, chuyển đổi tỷ giá ngoại tệ (USD, EUR, Tệ, Yên...).\n"
+        "Dùng khi hỏi: '1 đô là bao nhiêu tiền việt', 'tỷ giá yên nhật', 'đổi tiền'.", 
+        PropertyList({
+            Property("from_currency", kPropertyTypeString), // Ví dụ: USD, JPY, CNY
+            Property("to_currency", kPropertyTypeString)    // Mặc định là VND nếu không nói
+        }),
+        [](const PropertyList& props) -> ReturnValue {
+            std::string from = "USD";
+            std::string to = "VND";
+
+            if (props.has("from_currency")) from = props["from_currency"].value<std::string>();
+            if (props.has("to_currency")) to = props["to_currency"].value<std::string>();
+            
+            // Xử lý AI hay trả về tên dài -> rút gọn
+            if (from == "đô la" || from == "đô") from = "USD";
+            if (from == "nhân dân tệ" || from == "tệ") from = "CNY";
+            if (from == "yên") from = "JPY";
+            if (from == "euro") from = "EUR";
+
+            std::string resp = call_api_get("/currency?from=" + from + "&to=" + to);
+            
+            cJSON* json = cJSON_Parse(resp.c_str());
+            std::string text = "Lỗi lấy tỷ giá.";
+            if (json) {
+                cJSON* t = cJSON_GetObjectItem(json, "text");
+                if (t) text = t->valuestring;
+                cJSON_Delete(json);
+            }
+            return "{\"result\": \"" + text + "\"}";
+        });
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
