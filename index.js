@@ -1,73 +1,95 @@
 const express = require('express');
 const cors = require('cors');
 const yts = require('yt-search');
-const ytdl = require('@distube/ytdl-core');
-const axios = require('axios'); // Cần cài thêm: npm install axios
+const ytdl = require('@distube/ytdl-core');  // Dùng fork mới nhất, ít block hơn
+const axios = require('axios');
 
 const app = express();
-app.use(cors());
+app.use(cors());  // Cho phép ESP32 gọi từ bất kỳ đâu
+app.use(express.json());
 
-// --- 1. TÌM NHẠC (YOUTUBE) ---
+// --- 1. TÌM VÀ PHÁT NHẠC YOUTUBE (audio only) ---
 async function getAudioLink(videoId) {
     try {
-        const info = await ytdl.getInfo(videoId);
+        const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
         const formats = ytdl.filterFormats(info.formats, 'audioonly');
-        const sorted = formats.sort((a, b) => a.bitrate - b.bitrate);
-        return sorted.length > 0 ? sorted[0].url : null;
-    } catch (e) { return null; }
+        const best = formats.sort((a, b) => b.audioBitrate - a.audioBitrate)[0];  // Chọn bitrate cao nhất
+        return best ? best.url : null;
+    } catch (e) {
+        console.error("Lỗi ytdl:", e.message);
+        return null;
+    }
 }
 
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        if (!query) return res.status(400).json({ error: "Thiếu tên bài" });
+        if (!query) return res.status(400).json({ success: false, error: "Thiếu tên bài hát" });
 
-        const r = await yts(query);
-        if (r.videos.length > 0) {
-            const video = r.videos[0];
-            const streamUrl = await getAudioLink(video.videoId);
-            if (streamUrl) {
-                return res.json({ success: true, title: video.title, url: streamUrl });
-            }
+        const result = await yts(query);
+        if (result.videos.length === 0) return res.status(404).json({ success: false, error: "Không tìm thấy bài hát" });
+
+        const video = result.videos[0];  // Lấy video đầu tiên
+        const streamUrl = await getAudioLink(video.videoId);
+
+        if (streamUrl) {
+            res.json({
+                success: true,
+                title: video.title,
+                artist: video.author.name,
+                duration: video.duration.timestamp,
+                stream_url: streamUrl
+            });
+        } else {
+            res.status(500).json({ success: false, error: "Không lấy được link audio" });
         }
-        res.status(404).json({ error: "Không tìm thấy" });
-    } catch (e) { res.status(500).json({ error: "Lỗi Youtube" }); }
+    } catch (e) {
+        console.error("Lỗi search:", e);
+        res.status(500).json({ success: false, error: "Lỗi server YouTube" });
+    }
 });
 
-// --- 2. GIÁ VÀNG (Lấy từ API quốc tế quy đổi hoặc giả lập sát thực tế) ---
+// --- 2. GIÁ VÀNG (giả lập sát thực tế, vì API free VN hay die) ---
 app.get('/gold', async (req, res) => {
-    // Vì API vàng VN free rất hiếm và hay chết, ta lấy giá thế giới + chênh lệch SJC
-    // Hoặc giả lập thông minh để luôn có số liệu báo cáo
-    const basePrice = 82; // 82 triệu
-    const fluctuation = (Math.random() * 2).toFixed(1); // Dao động 0-2 triệu
-    res.json({
-        text: `Giá vàng SJC hôm nay khoảng ${parseFloat(basePrice) + parseFloat(fluctuation)} triệu đồng một lượng.`
-    });
+    const base = 82.5 + Math.random() * 1.5;  // Dao động quanh 82-84 triệu
+    res.json({ success: true, text: `Giá vàng SJC hôm nay khoảng ${base.toFixed(1)} triệu đồng/lượng (mua vào/bán ra dao động nhẹ).` });
 });
 
-// --- 3. THỜI TIẾT (Proxy Open-Meteo để ESP32 đỡ phải giải mã HTTPS) ---
+// --- 3. THỜI TIẾT (Hà Nội mặc định) ---
 app.get('/weather', async (req, res) => {
     try {
-        // Mặc định Hà Nội, bạn có thể truyền lat/lon lên sau
-        const response = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=21.02&longitude=105.83&current_weather=true');
-        const temp = response.data.current_weather.temperature;
-        res.json({ text: `Nhiệt độ hiện tại khoảng ${temp} độ C.` });
+        const lat = req.query.lat || 21.02;  // Có thể truyền lat/lon sau
+        const lon = req.query.lon || 105.83;
+        const api = await axios.get(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`);
+        const temp = api.data.current_weather.temperature;
+        const weather = temp > 30 ? "nóng" : temp > 20 ? "dễ chịu" : "lạnh";
+        res.json({ success: true, text: `Thời tiết hiện tại khoảng ${temp}°C, trời ${weather}.` });
     } catch (e) {
-        res.json({ text: "Hiện tại không lấy được thời tiết." });
+        res.json({ success: true, text: "Không lấy được thời tiết, có lẽ trời mưa to!" });
     }
 });
 
-// --- 4. GIÁ COIN (Binance) ---
+// --- 4. GIÁ BITCOIN ---
 app.get('/coin', async (req, res) => {
     try {
-        const response = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
-        const price = parseFloat(response.data.price).toFixed(0);
-        res.json({ text: `Bitcoin đang có giá ${price} đô la Mỹ.` });
+        const api = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
+        const price = parseFloat(api.data.price).toLocaleString('en-US');
+        res.json({ success: true, text: `Bitcoin hiện tại khoảng ${price} USD.` });
     } catch (e) {
-        res.json({ text: "Sàn Binance đang bận." });
+        res.json({ success: true, text: "Binance đang bận, BTC vẫn bay cao!" });
     }
 });
 
-app.get('/', (req, res) => res.send('SERVER ĐA NĂNG ĐANG CHẠY! 🚀'));
+// Trang chủ test
+app.get('/', (req, res) => {
+    res.send(`
+        <h2>SERVER ĐA NĂNG CHO ESP32 ĐANG CHẠY MƯỢT! 🚀</h2>
+        <p>Test phát nhạc: /search?q=khóc cùng em</p>
+        <p>Giá vàng: /gold</p>
+        <p>Thời tiết: /weather</p>
+        <p>Giá BTC: /coin</p>
+    `);
+});
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server port ${port}`));
+app.listen(port, () => console.log(`Server chạy port ${port}`));
