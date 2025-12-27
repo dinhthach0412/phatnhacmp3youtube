@@ -1,71 +1,69 @@
 const express = require('express');
 const cors = require('cors');
-const { ZingMp3 } = require("zingmp3-api-full");
+const yts = require('yt-search');
+const ytdl = require('@distube/ytdl-core');
 
 const app = express();
 app.use(cors());
 
-// Cổng mặc định (Render sẽ tự cấp cổng qua biến PORT)
-const port = process.env.PORT || 3000;
+// Hàm lấy link stream (Cố gắng lấy format nhẹ nhất cho ESP32)
+async function getAudioLink(videoId) {
+    try {
+        const info = await ytdl.getInfo(videoId);
+        // Lọc lấy chỉ âm thanh (audio only)
+        const formats = ytdl.filterFormats(info.formats, 'audioonly');
+        
+        // Ưu tiên định dạng m4a hoặc mp3 bitrate thấp để ESP32 load nhanh
+        // Sắp xếp bitrate từ thấp lên cao (để đỡ lag)
+        const sorted = formats.sort((a, b) => a.bitrate - b.bitrate);
+        
+        if (sorted.length > 0) {
+            return sorted[0].url; // Lấy link nhẹ nhất
+        }
+        return null;
+    } catch (e) {
+        console.error("Lỗi lấy link YTDL:", e);
+        return null;
+    }
+}
 
-// API chính: /search?q=ten_bai_hat
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        if (!query) {
-            return res.status(400).json({ error: "Thiếu tên bài hát (q=...)" });
-        }
+        if (!query) return res.status(400).json({ error: "Thiếu tên bài" });
 
-        console.log(`--> ESP32 đang tìm: ${query}`);
-
-        // 1. Tìm kiếm bài hát
-        const searchResult = await ZingMp3.search(query);
+        console.log(`🔍 Đang tìm Youtube: ${query}`);
         
-        // Kiểm tra xem có bài nào không
-        if (searchResult.data && searchResult.data.items && searchResult.data.items.length > 0) {
-            // Lấy bài đầu tiên (độ chính xác cao nhất)
-            // Lọc qua mảng items để tìm object có type là 'song' (vì nó trả về cả playlist/video)
-            const song = searchResult.data.items.find(item => item.sectionType === 'song' || (item.encodeId && item.title));
-            
-            if (!song) {
-                 return res.status(404).json({ error: "Không tìm thấy bài hát nào hợp lệ" });
-            }
+        // 1. Tìm video
+        const r = await yts(query);
+        const videos = r.videos;
 
-            console.log(`--> Đã thấy bài: ${song.title} (${song.encodeId})`);
+        if (videos && videos.length > 0) {
+            const video = videos[0]; // Lấy kết quả đầu tiên
+            console.log(`✅ Thấy bài: ${video.title} (${video.videoId})`);
 
-            // 2. Lấy link stream (128kbps là đủ cho ESP32 và dễ load nhất)
-            const streamResult = await ZingMp3.getStreaming(song.encodeId);
+            // 2. Lấy link stream thực tế
+            const streamUrl = await getAudioLink(video.videoId);
 
-            if (streamResult.data && streamResult.data["128"]) {
-                // Link ngon! Trả về cho ESP32
-                // Lưu ý: Link Zing có redirect, nhưng ESP32 (V87) của bạn xử lý được.
-                const directUrl = streamResult.data["128"];
-                
+            if (streamUrl) {
                 return res.json({
                     success: true,
-                    title: song.title,
-                    artist: song.artistsNames,
-                    url: directUrl
+                    title: video.title,
+                    url: streamUrl
                 });
             } else {
-                // Bài này có thể là VIP hoặc bị chặn
-                return res.status(403).json({ error: "Bài này VIP hoặc không có link stream" });
+                return res.status(500).json({ error: "Không lấy được link stream" });
             }
-        } else {
-            return res.status(404).json({ error: "Không tìm thấy bài hát" });
         }
+        res.status(404).json({ error: "Không tìm thấy video nào" });
 
-    } catch (error) {
-        console.error("Lỗi Server:", error);
-        res.status(500).json({ error: "Lỗi nội bộ Server" });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Lỗi Server Youtube" });
     }
 });
 
-// Trang chủ để test xem server sống hay chết
-app.get('/', (req, res) => {
-    res.send('<h1>Server Nhạc ESP32 Đang Chạy! 🚀</h1><p>Hãy gọi: /search?q=son+tung</p>');
-});
+app.get('/', (req, res) => res.send('<h1>Server Nhạc Youtube Sẵn Sàng! 🎵</h1>'));
 
-app.listen(port, () => {
-    console.log(`Server đang chạy tại cổng ${port}`);
-});
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server chạy port ${port}`));
