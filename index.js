@@ -115,18 +115,6 @@ app.get('/currency', async (req, res) => {
     }
 });
 
-// ... (Giữ nguyên phần server listen ở cuối)
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server chạy port ${port}`));
-👉 Làm xong nhớ git push lên Render nhé!
-
-🛠️ BƯỚC 2: CẬP NHẬT MCP TRÊN ESP32 (mcp_server.cc)
-Bây giờ bạn thêm 2 công cụ mới vào hàm AddCommonTools trong file main/mcp_server.cc. Mình viết bằng cú pháp chuẩn (Property) để không bị lỗi build như lúc nãy.
-
-Thêm đoạn này vào trong hàm void McpServer::AddCommonTools():
-
-C++
-
     // 🪙 CÔNG CỤ 4: GIÁ COIN (BINANCE)
     AddTool("self.finance.coin", 
         "Tra cứu giá tiền ảo (Crypto) từ Binance.\n"
