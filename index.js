@@ -8,52 +8,56 @@ const fs = require('fs');
 const app = express();
 app.use(cors());
 
-// --- 0. TỰ ĐỘNG CẬP NHẬT YT-DLP KHI KHỞI ĐỘNG ---
-console.log("🔄 Đang kiểm tra cập nhật yt-dlp...");
+// --- 0. UPDATE YT-DLP (Để chắc chắn bản mới nhất) ---
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.stdout.on('data', d => console.log(`Update log: ${d}`));
-updateProcess.on('close', (code) => {
-    console.log(`✅ Cập nhật hoàn tất (Code ${code}). Bắt đầu server...`);
-    startServer();
-});
+updateProcess.on('close', () => console.log("✅ YT-DLP Update Check Done."));
 
-// --- 1. TẠO FILE COOKIES ---
+// --- 1. GIẢI MÃ COOKIES TỪ BASE64 (FIX LỖI MẤT DÒNG) ---
 if (process.env.YT_COOKIES) {
     try {
-        fs.writeFileSync('cookies.txt', process.env.YT_COOKIES);
-        console.log("🍪 Đã nạp Cookies.");
-    } catch (err) { console.error("❌ Lỗi tạo cookies:", err); }
+        console.log("🍪 Đang giải mã Cookies từ Base64...");
+        // Giải mã chuỗi Base64 thành text gốc có xuống dòng đàng hoàng
+        const decodedCookies = Buffer.from(process.env.YT_COOKIES, 'base64').toString('utf-8');
+        fs.writeFileSync('cookies.txt', decodedCookies);
+        console.log("✅ Đã tạo file cookies.txt CHUẨN ĐỊNH DẠNG!");
+    } catch (err) {
+        console.error("❌ Lỗi giải mã cookies:", err);
+    }
 }
 
-// --- 2. HÀM LẤY LINK (CÓ LOG CHI TIẾT) ---
+// --- 2. HÀM LẤY LINK ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
         console.log(`1️⃣ Đang xin Link Youtube cho: "${query}"...`);
         
         const args = [
             `ytsearch1:${query}`,
-            '-f', 'bestaudio',
+            '-f', 'bestaudio', // Ưu tiên audio ngon nhất
             '--get-url',
             '--force-ipv4',
             '--no-playlist',
             '--no-warnings'
         ];
 
-        // Nếu có file cookies thì thêm vào, không thì thôi (thử vận may)
+        // Kiểm tra file cookies có tồn tại không
         if (fs.existsSync('cookies.txt')) {
-            args.push('--cookies', 'cookies.txt');
-            console.log("   -> Đang dùng Cookies để xác thực.");
-        } else {
-            console.log("   -> KHÔNG tìm thấy Cookies, chạy chế độ ẩn danh.");
+            // Đọc thử 100 ký tự đầu xem file có nội dung không
+            const checkFile = fs.readFileSync('cookies.txt', 'utf8');
+            if (checkFile.length > 10) {
+                args.push('--cookies', 'cookies.txt');
+                console.log("   -> Đang dùng Cookies (Đã fix lỗi format).");
+            } else {
+                console.log("   -> File Cookies rỗng, bỏ qua.");
+            }
         }
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
 
         let url = '';
-        let errorLog = ''; // Biến để hứng lỗi
+        let errorLog = ''; 
         
         yt.stdout.on('data', d => url += d.toString());
-        yt.stderr.on('data', d => errorLog += d.toString()); // Hứng lỗi vào đây
+        yt.stderr.on('data', d => errorLog += d.toString());
 
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
@@ -61,8 +65,7 @@ function getAudioUrl(query) {
                 console.log("✅ LẤY LINK THÀNH CÔNG!");
                 resolve(finalUrl);
             } else {
-                // IN RA LỖI ĐỂ BIẾT ĐƯỜNG SỬA
-                console.error(`❌ YT-DLP THẤT BẠI. LÝ DO:\n${errorLog}`);
+                console.error(`❌ YT-DLP LỖI (Code ${code}):\n${errorLog}`);
                 resolve(null);
             }
         });
@@ -73,27 +76,20 @@ function getAudioUrl(query) {
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'No query' });
-
-    console.log(`🔍 ESP32 tìm: ${q}`);
     const myServerUrl = `https://${req.get('host')}/stream?q=${encodeURIComponent(q)}`;
-    
-    // Trả về luôn để ESP32 gọi stream
     res.json({ success: true, title: q, artist: "Youtube", url: myServerUrl });
 });
 
-// --- 4. API STREAM (Axios + FFmpeg Fix lỗi -6) ---
+// --- 4. API STREAM ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
 
-    // Lấy Link thật
     const audioUrl = await getAudioUrl(q);
     
-    if (!audioUrl) {
-        return res.status(404).send("YT-DLP Error - Check Server Log");
-    }
+    if (!audioUrl) return res.status(404).send("Lỗi lấy link Youtube (Xem log Render)");
 
-    console.log("🚀 Bắt đầu Stream & Convert...");
+    console.log("🚀 Stream & Convert...");
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
     res.setHeader('Connection', 'close');
@@ -121,12 +117,10 @@ app.get('/stream', async (req, res) => {
             .pipe(res, { end: true });
 
     } catch (e) {
-        console.error("❌ Lỗi Axios:", e.message);
+        console.error("❌ Lỗi Stream:", e.message);
         if (!res.headersSent) res.status(502).send('Stream Error');
     }
 });
 
-function startServer() {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
