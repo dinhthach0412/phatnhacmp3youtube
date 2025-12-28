@@ -68,20 +68,28 @@ app.get('/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- API 2: STREAM & CONVERT ---
+// --- API 2: STREAM & CONVERT (Đã tối ưu tốc độ) ---
 app.get('/stream', (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) return res.status(400).send("No URL provided");
 
-    console.log("Đang Transcode sang MP3...");
+    console.log("Đang Transcode sang MP3 (Ultrafast)...");
     res.setHeader('Content-Type', 'audio/mpeg');
 
     ffmpeg(audioUrl)
-        .format('mp3')
         .audioCodec('libmp3lame')
-        .audioBitrate(128)
+        .format('mp3')
+        .audioBitrate(128)     // 128kbps là đủ nghe
+        .audioChannels(2)      // Ép Stereo
+        .outputOptions([
+            '-preset ultrafast',             // QUAN TRỌNG: Chuyển đổi siêu tốc
+            '-movflags frag_keyframe+empty_moov' // Tối ưu cho streaming (phát ngay khi có dữ liệu)
+        ])
         .on('error', (err) => {
-            console.error('Lỗi Transcode:', err.message);
+            // Lỗi khi client ngắt kết nối là bình thường, không cần log rác
+            if (err.message !== 'Output stream closed') {
+                console.error('Lỗi Transcode:', err.message);
+            }
             if (!res.headersSent) res.status(500).send('Stream Error');
         })
         .pipe(res, { end: true });
