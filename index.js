@@ -7,7 +7,7 @@ const fs = require('fs');
 const app = express();
 app.use(cors());
 
-// --- TẠO FILE COOKIES TỪ BIẾN MÔI TRƯỜNG ---
+// --- TẠO FILE COOKIES ---
 if (process.env.YT_COOKIES) {
     try {
         console.log("🍪 Đang tạo file cookies.txt...");
@@ -20,17 +20,21 @@ if (process.env.YT_COOKIES) {
 
 function getYtDlpLink(query) {
     return new Promise((resolve, reject) => {
-        // Cấu hình lệnh yt-dlp (Đã sửa lỗi Format Not Available)
+        // --- CẤU HÌNH LỆNH ĂN TẠP (QUAN TRỌNG) ---
         const args = [
             `ytsearch1:${query}`, 
-            // SỬA Ở ĐÂY: Thử lấy m4a trước, không được thì lấy bestaudio, cùng lắm thì lấy best (video+audio)
-            '-f', 'bestaudio[ext=m4a]/bestaudio/best',    
+            
+            // Ý nghĩa: "ba*" (Best Audio) HOẶC "b*" (Best Video+Audio)
+            // Lấy bất cứ thứ gì có tiếng là được!
+            '-f', 'ba*/b*',    
+            
             '--get-url',          
             '--no-warnings',
-            '--cookies', 'cookies.txt', // Dùng Cookies xịn của bạn
-            '--force-ipv4'              // Ép dùng IPv4 để tránh lỗi mạng trên Render
+            '--cookies', 'cookies.txt', 
+            '--force-ipv4'              
         ];
 
+        // Gọi lệnh yt-dlp
         const ytDlp = spawn('yt-dlp', args);
 
         let outputUrl = '';
@@ -46,12 +50,15 @@ function getYtDlpLink(query) {
 
         ytDlp.on('close', (code) => {
             if (code === 0 && outputUrl) {
-                // yt-dlp có thể trả về 2 link (video+audio), ta chỉ lấy dòng đầu tiên
-                const finalUrl = outputUrl.split('\n')[0];
+                // Nếu yt-dlp trả về nhiều dòng (ví dụ video riêng, audio riêng)
+                // Ta sẽ lấy dòng cuối cùng (thường là file hoàn chỉnh nhất hoặc file audio)
+                const urls = outputUrl.split('\n');
+                const finalUrl = urls[urls.length - 1]; // Lấy cái cuối cho chắc
                 resolve(finalUrl);
             } else {
                 console.error(`yt-dlp error log: ${errorLog}`);
-                reject(new Error(`yt-dlp exited with code ${code}`));
+                // Thay vì reject làm sập server, ta trả về null để xử lý sau
+                resolve(null); 
             }
         });
     });
@@ -61,12 +68,16 @@ function getYtDlpLink(query) {
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        console.log("🔍 ESP32 đang tìm (Cookies Mode):", query);
+        console.log("🔍 ESP32 tìm (Cookies + Ăn tạp):", query);
         
         const audioUrl = await getYtDlpLink(query);
         
-        // Link trả về từ yt-dlp rất dài, in ra 50 ký tự đầu để check thôi
-        console.log("✅ Link Youtube Gốc:", audioUrl.substring(0, 50) + "...");
+        if (!audioUrl) {
+            console.error("❌ yt-dlp không lấy được link nào cả.");
+            return res.status(500).json({ error: "Cannot extract URL" });
+        }
+
+        console.log("✅ Link Youtube lấy được:", audioUrl.substring(0, 30) + "...");
 
         const myServerUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(audioUrl)}`;
         
@@ -78,12 +89,12 @@ app.get('/search', async (req, res) => {
         });
 
     } catch (e) { 
-        console.error("❌ Lỗi yt-dlp:", e.message);
-        res.status(500).json({ error: "Server Error" }); 
+        console.error("❌ Server Error:", e.message);
+        res.status(500).json({ error: "Server Internal Error" }); 
     }
 });
 
-// API 2: STREAM & CONVERT
+// API 2: STREAM & CONVERT (Giữ nguyên)
 const axios = require('axios');
 app.get('/stream', async (req, res) => {
     const audioUrl = req.query.url;
@@ -98,7 +109,6 @@ app.get('/stream', async (req, res) => {
             url: audioUrl,
             responseType: 'stream', 
             headers: {
-                // Fake User Agent giống như lúc lấy Cookies
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
@@ -109,18 +119,15 @@ app.get('/stream', async (req, res) => {
             .audioBitrate(128)
             .audioChannels(2)
             .outputOptions(['-preset ultrafast', '-movflags frag_keyframe+empty_moov'])
-            .on('error', (err) => { 
-                // Không in lỗi nếu client ngắt kết nối
-            })
+            .on('error', (err) => {})
             .pipe(res, { end: true });
 
     } catch (error) {
-        console.error("Stream Error:", error.message);
         if (!res.headersSent) res.status(502).send('Bad Gateway');
     }
 });
 
-app.get('/', (req, res) => { res.send('SERVER OK (COOKIES + FIX FORMAT) 🚀'); });
+app.get('/', (req, res) => { res.send('SERVER OK (OMNIVORE MODE) 🚀'); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
