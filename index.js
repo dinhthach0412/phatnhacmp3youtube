@@ -103,6 +103,10 @@ app.get('/gold', async (req, res) => {
 app.get('/weather', async (req, res) => { 
     res.json({ text: "Thời tiết Demo" }); 
 });
+// Thêm Cửa Chính (Trang chủ)
+app.get('/', (req, res) => {
+    res.send('SERVER XIAOZHI VIETNAM (FFMPEG) ĐANG CHẠY NGON LÀNH! 🚀');
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server MP3 Converter running on port ${PORT}`));
