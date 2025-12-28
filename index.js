@@ -3,68 +3,33 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors());
 
-// --- BIẾN TOÀN CỤC ĐỂ HIỂN THỊ LÊN WEB ---
+// --- TRẠNG THÁI SERVER (Để hiện lên Web) ---
 let serverStatus = "Đang khởi động...";
-let ytdlpVersion = "Đang kiểm tra...";
-let cookieStatus = "Chưa kiểm tra";
-let lastLog = "Chưa có yêu cầu nào";
+let provider = "SoundCloud (No Cookies)";
+let lastLog = "Chưa có yêu cầu";
 
-// --- 0. UPDATE YT-DLP NGẦM (Không chặn server khởi động) ---
-function updateYtDlp() {
-    const update = spawn('/usr/local/bin/yt-dlp', ['-U']);
-    update.stdout.on('data', d => { ytdlpVersion = `Đang update... ${d}`; });
-    update.on('close', () => {
-        // Lấy version sau khi update
-        const vCheck = spawn('/usr/local/bin/yt-dlp', ['--version']);
-        vCheck.stdout.on('data', d => { ytdlpVersion = d.toString().trim(); });
-        serverStatus = "Sẵn sàng (Ready)";
-    });
-}
-// Chạy update ngay lập tức
-updateYtDlp();
+// --- 0. UPDATE YT-DLP (Vẫn cần update để hỗ trợ SC tốt nhất) ---
+const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
+updateProcess.on('close', () => { serverStatus = "Sẵn sàng (Ready)"; });
 
-// --- 1. GIẢI MÃ COOKIES ---
-if (process.env.YT_COOKIES) {
-    try {
-        const decoded = Buffer.from(process.env.YT_COOKIES, 'base64').toString('utf-8');
-        fs.writeFileSync('cookies.txt', decoded);
-        const stats = fs.statSync('cookies.txt');
-        cookieStatus = `✅ Đã nạp (${stats.size} bytes)`;
-    } catch (err) {
-        cookieStatus = `❌ Lỗi nạp: ${err.message}`;
-    }
-} else {
-    cookieStatus = "⚠️ Không tìm thấy biến YT_COOKIES";
-}
-
-// --- 2. HÀM LẤY LINK (CHIẾN THUẬT GIẢ LẬP ANDROID) ---
+// --- 1. HÀM LẤY LINK TỪ SOUNDCLOUD ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
-        lastLog = `Đang tìm: ${query}`;
+        lastLog = `🔍 Đang tìm SC: ${query}`;
         
         const args = [
-            `ytsearch1:${query}`,
-            '-f', 'bestaudio', 
+            `scsearch1:${query}`,           // Tìm 1 bài trên SoundCloud
+            '-f', 'http_mp3_128/bestaudio', // Ưu tiên link MP3 trực tiếp
             '--get-url',
             '--no-playlist',
             '--no-warnings',
-            '--force-ipv4',
-            
-            // --- CHIẾN THUẬT MỚI: GIẢ LẬP CLIENT KHÁC ---
-            // Nếu dùng Cookies máy tính bị chặn, ta thử giả vờ là TV hoặc Android
-            // Cách này thường né được lỗi "Sign in"
-            '--extractor-args', 'youtube:player_client=android', 
+            '--force-ipv4'
+            // KHÔNG COOKIES - KHÔNG LOGIN
         ];
-
-        if (fs.existsSync('cookies.txt')) {
-            args.push('--cookies', 'cookies.txt');
-        }
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
 
@@ -76,59 +41,44 @@ function getAudioUrl(query) {
 
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
-                lastLog = `✅ Thành công: ${query}`;
-                resolve(url.trim().split('\n')[0]);
+                const finalUrl = url.trim().split('\n')[0];
+                lastLog = `✅ Tìm thấy: ${query}`;
+                console.log(`Link SC: ${finalUrl}`);
+                resolve(finalUrl);
             } else {
-                lastLog = `❌ Lỗi tìm kiếm: ${err.substring(0, 100)}...`;
-                console.error(err); // In lỗi ra console render
+                lastLog = `❌ Không thấy: ${err.substring(0, 50)}...`;
+                console.error(err);
                 resolve(null);
             }
         });
     });
 }
 
-// --- 3. GIAO DIỆN WEB (UPTIMEROBOT SẼ PING VÀO ĐÂY) ---
+// --- 2. GIAO DIỆN WEB (CHO UPTIME ROBOT) ---
 app.get('/', (req, res) => {
-    // Trả về trang HTML đẹp mắt
     res.send(`
     <!DOCTYPE html>
     <html lang="vi">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ESP32 Music Server</title>
+        <title>Music Server</title>
         <style>
-            body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background-color: #1e1e1e; padding: 2rem; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 350px; text-align: center; }
-            h1 { color: #bb86fc; margin-bottom: 0.5rem; }
-            .status { font-size: 0.9rem; margin: 10px 0; padding: 10px; background: #2c2c2c; border-radius: 8px; text-align: left; }
-            .status span { float: right; font-weight: bold; }
-            .green { color: #03dac6; }
-            .red { color: #cf6679; }
-            .log { font-size: 0.8rem; color: #888; margin-top: 15px; font-style: italic; border-top: 1px solid #333; padding-top: 10px; }
-            .btn { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #3700b3; color: white; text-decoration: none; border-radius: 5px; }
+            body { background-color: #f2f2f2; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .card { background: white; padding: 2rem; border-radius: 12px; width: 320px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            h1 { color: #ff5500; } 
+            .stat { background: #eee; padding: 8px; border-radius: 4px; margin: 5px 0; text-align: left; font-size: 0.9em; }
+            .stat b { float: right; color: #333; }
+            .green { color: #28a745 !important; }
+            .log { margin-top: 15px; font-size: 0.8em; color: #666; font-style: italic; border-top: 1px solid #ddd; padding-top: 10px; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h1>🎵 Music Server</h1>
-            <p>Dành cho ESP32 - By Gemini</p>
-            
-            <div class="status">
-                Trạng thái: <span class="${serverStatus.includes('Ready') ? 'green' : 'red'}">${serverStatus}</span>
-            </div>
-            <div class="status">
-                yt-dlp Version: <span>${ytdlpVersion}</span>
-            </div>
-            <div class="status">
-                Cookies: <span class="${cookieStatus.includes('✅') ? 'green' : 'red'}">${cookieStatus.split(' ')[0]}</span>
-            </div>
-            
-            <div class="log">
-                Log gần nhất:<br> ${lastLog}
-            </div>
-
-            <a href="/" class="btn">Refresh trạng thái</a>
+            <h1>☁️ SoundCloud</h1>
+            <div class="stat">Trạng thái <b class="green">${serverStatus}</b></div>
+            <div class="stat">Chế độ <b>${provider}</b></div>
+            <div class="log">${lastLog}</div>
         </div>
     </body>
     </html>
@@ -139,8 +89,10 @@ app.get('/', (req, res) => {
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'No query' });
+    
+    // Trả về link stream ngay
     const myServerUrl = `https://${req.get('host')}/stream?q=${encodeURIComponent(q)}`;
-    res.json({ success: true, title: q, artist: "Youtube", url: myServerUrl });
+    res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
 // --- API STREAM ---
@@ -150,10 +102,7 @@ app.get('/stream', async (req, res) => {
 
     const audioUrl = await getAudioUrl(q);
     
-    if (!audioUrl) {
-        // Trả về file âm thanh lỗi (hoặc tiếng bíp) nếu muốn, ở đây trả về lỗi 404
-        return res.status(404).send("Lỗi: Không lấy được link (Kiểm tra Cookies/IP)");
-    }
+    if (!audioUrl) return res.status(404).send("Not found");
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
@@ -163,10 +112,7 @@ app.get('/stream', async (req, res) => {
             url: audioUrl,
             method: 'GET',
             responseType: 'stream',
-            headers: {
-                // Fake User Agent cực mạnh
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
-            }
+            headers: { 'User-Agent': 'Mozilla/5.0' }
         });
 
         ffmpeg(response.data)
@@ -176,14 +122,14 @@ app.get('/stream', async (req, res) => {
             .audioFrequency(44100)
             .format('mp3')
             .outputOptions(['-vn', '-map_metadata', '-1', '-preset', 'ultrafast'])
-            .on('error', err => { if(!err.message.includes('Output')) console.error('FFmpeg:', err.message); })
+            .on('error', () => {})
             .pipe(res, { end: true });
 
     } catch (e) {
-        console.error("Axios Error:", e.message);
+        console.error("Stream Error:", e.message);
         if (!res.headersSent) res.status(502).send('Stream Error');
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server chạy tại port ${PORT}`));
+app.listen(PORT, () => console.log(`Server chạy port ${PORT}`));
