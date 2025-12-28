@@ -2,84 +2,97 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
+const fs = require('fs'); // Thêm thư viện quản lý file
 
 const app = express();
 app.use(cors());
 
-// Hàm dùng yt-dlp để tìm link nhạc trực tiếp từ Youtube
+// --- BƯỚC QUAN TRỌNG: TẠO FILE COOKIES TỪ BIẾN MÔI TRƯỜNG ---
+// Render sẽ lấy nội dung từ biến YT_COOKIES và ghi ra file cookies.txt
+if (process.env.YT_COOKIES) {
+    try {
+        console.log("🍪 Đang tạo file cookies.txt từ biến môi trường...");
+        fs.writeFileSync('cookies.txt', process.env.YT_COOKIES);
+        console.log("✅ Đã tạo file cookies.txt thành công!");
+    } catch (err) {
+        console.error("❌ Lỗi tạo cookies:", err);
+    }
+} else {
+    console.warn("⚠️ CẢNH BÁO: Chưa có biến YT_COOKIES trên Render. Có thể bị chặn!");
+}
+
 function getYtDlpLink(query) {
     return new Promise((resolve, reject) => {
-        // Lệnh: yt-dlp "ytsearch1:tên bài hát" --get-url -f bestaudio
-        const ytDlp = spawn('yt-dlp', [
-            `ytsearch1:${query}`, // Tìm video đầu tiên
-            '-f', 'bestaudio',    // Lấy file âm thanh tốt nhất (m4a/webm)
-            '--get-url',          // Chỉ lấy link, không tải file
-            '--no-warnings'       // Tắt cảnh báo cho sạch log
-        ]);
+        // Cấu hình lệnh yt-dlp CÓ SỬ DỤNG COOKIES
+        const args = [
+            `ytsearch1:${query}`, 
+            '-f', 'bestaudio',    
+            '--get-url',          
+            '--no-warnings',
+            '--cookies', 'cookies.txt', // <--- CHÌA KHÓA VẠN NĂNG Ở ĐÂY
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' // Fake User Agent
+        ];
+
+        const ytDlp = spawn('yt-dlp', args);
 
         let outputUrl = '';
+        let errorLog = '';
 
         ytDlp.stdout.on('data', (data) => {
             outputUrl += data.toString().trim();
         });
 
         ytDlp.stderr.on('data', (data) => {
-            console.error(`yt-dlp log: ${data}`);
+            errorLog += data.toString();
         });
 
         ytDlp.on('close', (code) => {
             if (code === 0 && outputUrl) {
-                // yt-dlp đôi khi trả về nhiều link, chỉ lấy dòng đầu tiên
                 const finalUrl = outputUrl.split('\n')[0];
                 resolve(finalUrl);
             } else {
+                // In lỗi ra để debug nếu cần
+                console.error(`yt-dlp error log: ${errorLog}`);
                 reject(new Error(`yt-dlp exited with code ${code}`));
             }
         });
     });
 }
 
-// API 1: TÌM KIẾM (Dùng yt-dlp)
+// API 1: TÌM KIẾM
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        console.log("🔍 ESP32 đang tìm (yt-dlp):", query);
+        console.log("🔍 ESP32 đang tìm (Cookies Mode):", query);
         
-        // 1. Lấy link stream từ yt-dlp
         const audioUrl = await getYtDlpLink(query);
-        console.log("✅ yt-dlp tìm thấy link:", audioUrl.substring(0, 50) + "...");
+        console.log("✅ yt-dlp tìm thấy link:", audioUrl.substring(0, 30) + "...");
 
-        // 2. Tạo link HTTPS của server mình để trả về cho ESP32
-        // Lưu ý: Mình fake tiêu đề là chính query vì yt-dlp lấy title hơi chậm, 
-        // mục tiêu là tốc độ.
         const myServerUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(audioUrl)}`;
         
         return res.json({ 
             success: true, 
-            title: query,       // Tạm thời lấy tên bài là từ khóa tìm kiếm
+            title: query,       
             artist: "Youtube", 
             url: myServerUrl 
         });
 
     } catch (e) { 
         console.error("❌ yt-dlp thất bại:", e.message);
-        res.status(500).json({ error: "Server Error" }); 
+        res.status(500).json({ error: "Server Error (Check Cookies)" }); 
     }
 });
 
 // API 2: STREAM (Dùng Axios tải -> Pipe vào FFmpeg)
-const axios = require('axios'); // Nhớ cài axios: npm install axios
+const axios = require('axios');
 app.get('/stream', async (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) return res.status(400).send("No URL provided");
 
-    console.log("🚀 Transcode (Direct -> FFmpeg)...");
-    
+    console.log("🚀 Transcode...");
     res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Transfer-Encoding', 'chunked');
 
     try {
-        // yt-dlp trả về link google, ta dùng axios hút nó về rồi bơm vào ffmpeg
         const response = await axios({
             method: 'get',
             url: audioUrl,
@@ -94,26 +107,16 @@ app.get('/stream', async (req, res) => {
             .format('mp3')
             .audioBitrate(128)
             .audioChannels(2)
-            .audioFrequency(44100)
             .outputOptions(['-preset ultrafast', '-movflags frag_keyframe+empty_moov'])
-            .on('error', (err) => {
-                if (err.message && !err.message.includes('Output stream closed')) {
-                    console.error('🔥 Lỗi Transcode:', err.message);
-                }
-            })
+            .on('error', (err) => {})
             .pipe(res, { end: true });
 
     } catch (error) {
-        console.error("❌ Lỗi tải nhạc nguồn:", error.message);
         if (!res.headersSent) res.status(502).send('Bad Gateway');
     }
 });
 
-// Các API phụ giữ nguyên
-app.get('/coin', async (req, res) => { res.json({ text: "Giá Coin Demo" }); });
-app.get('/gold', async (req, res) => { res.json({ text: "Giá Vàng Demo" }); });
-app.get('/weather', async (req, res) => { res.json({ text: "Thời tiết Demo" }); });
-app.get('/', (req, res) => { res.send('SERVER ALIVE (YT-DLP CORE) 🚀'); });
+app.get('/', (req, res) => { res.send('SERVER ALIVE (COOKIES AUTH) 🚀'); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
