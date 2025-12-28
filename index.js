@@ -2,91 +2,103 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
-const axios = require('axios'); // Nhớ đảm bảo package.json có axios
+const axios = require('axios');
 const fs = require('fs');
 
 const app = express();
 app.use(cors());
 
-// --- 1. TẠO FILE COOKIES (Để yt-dlp dùng) ---
+// --- 0. TỰ ĐỘNG CẬP NHẬT YT-DLP KHI KHỞI ĐỘNG ---
+console.log("🔄 Đang kiểm tra cập nhật yt-dlp...");
+const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
+updateProcess.stdout.on('data', d => console.log(`Update log: ${d}`));
+updateProcess.on('close', (code) => {
+    console.log(`✅ Cập nhật hoàn tất (Code ${code}). Bắt đầu server...`);
+    startServer();
+});
+
+// --- 1. TẠO FILE COOKIES ---
 if (process.env.YT_COOKIES) {
     try {
         fs.writeFileSync('cookies.txt', process.env.YT_COOKIES);
-        console.log("✅ Đã nạp Cookies thành công.");
+        console.log("🍪 Đã nạp Cookies.");
     } catch (err) { console.error("❌ Lỗi tạo cookies:", err); }
 }
 
-// --- 2. HÀM LẤY LINK AUDIO GỐC (Dùng yt-dlp + Cookies) ---
+// --- 2. HÀM LẤY LINK (CÓ LOG CHI TIẾT) ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
         console.log(`1️⃣ Đang xin Link Youtube cho: "${query}"...`);
         
-        const yt = spawn('/usr/local/bin/yt-dlp', [ // Đường dẫn tuyệt đối
+        const args = [
             `ytsearch1:${query}`,
-            '-f', 'bestaudio',     // Lấy file audio tốt nhất
-            '--get-url',           // Chỉ lấy Link
-            '--cookies', 'cookies.txt', // Quan trọng: Dùng Cookies
+            '-f', 'bestaudio',
+            '--get-url',
             '--force-ipv4',
             '--no-playlist',
             '--no-warnings'
-        ]);
+        ];
+
+        // Nếu có file cookies thì thêm vào, không thì thôi (thử vận may)
+        if (fs.existsSync('cookies.txt')) {
+            args.push('--cookies', 'cookies.txt');
+            console.log("   -> Đang dùng Cookies để xác thực.");
+        } else {
+            console.log("   -> KHÔNG tìm thấy Cookies, chạy chế độ ẩn danh.");
+        }
+
+        const yt = spawn('/usr/local/bin/yt-dlp', args);
 
         let url = '';
+        let errorLog = ''; // Biến để hứng lỗi
         
         yt.stdout.on('data', d => url += d.toString());
-        
+        yt.stderr.on('data', d => errorLog += d.toString()); // Hứng lỗi vào đây
+
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
-                // Lấy link đầu tiên nếu có nhiều dòng
                 const finalUrl = url.trim().split('\n')[0];
-                console.log("✅ Đã có Link Gốc.");
+                console.log("✅ LẤY LINK THÀNH CÔNG!");
                 resolve(finalUrl);
             } else {
-                console.error("❌ yt-dlp không trả về link (Kiểm tra Cookies).");
+                // IN RA LỖI ĐỂ BIẾT ĐƯỜNG SỬA
+                console.error(`❌ YT-DLP THẤT BẠI. LÝ DO:\n${errorLog}`);
                 resolve(null);
             }
         });
     });
 }
 
-// --- 3. API TÌM KIẾM (Trả về link stream của server mình) ---
+// --- 3. API TÌM KIẾM ---
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'No query' });
 
     console.log(`🔍 ESP32 tìm: ${q}`);
-
-    // Mẹo: Trả về link stream luôn, trong link chứa Query tìm kiếm
-    // Khi ESP32 gọi link này, Server mới bắt đầu tìm và convert (Real-time)
     const myServerUrl = `https://${req.get('host')}/stream?q=${encodeURIComponent(q)}`;
-
-    res.json({
-        success: true,
-        title: q,
-        artist: "Youtube",
-        url: myServerUrl
-    });
+    
+    // Trả về luôn để ESP32 gọi stream
+    res.json({ success: true, title: q, artist: "Youtube", url: myServerUrl });
 });
 
-// --- 4. API STREAM (TRÁI TIM CỦA HỆ THỐNG) ---
-// Kết hợp: yt-dlp (lấy link) -> Axios (tải luồng) -> FFmpeg (lọc MP3) -> ESP32
+// --- 4. API STREAM (Axios + FFmpeg Fix lỗi -6) ---
 app.get('/stream', async (req, res) => {
-    const q = req.query.q; // Nhận từ khóa tìm kiếm
+    const q = req.query.q;
     if (!q) return res.status(400).send("No query");
 
-    // BƯỚC 1: Lấy Link Gốc
+    // Lấy Link thật
     const audioUrl = await getAudioUrl(q);
-    if (!audioUrl) return res.status(404).send("No audio found");
+    
+    if (!audioUrl) {
+        return res.status(404).send("YT-DLP Error - Check Server Log");
+    }
 
     console.log("🚀 Bắt đầu Stream & Convert...");
-
-    // Thiết lập Header chuẩn cho ESP32
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('Connection', 'close'); // Ngắt kết nối sạch sẽ
+    res.setHeader('Connection', 'close');
 
     try {
-        // BƯỚC 2: Dùng Axios hút dữ liệu về (Giả danh trình duyệt)
         const response = await axios({
             url: audioUrl,
             method: 'GET',
@@ -96,34 +108,25 @@ app.get('/stream', async (req, res) => {
             }
         });
 
-        // BƯỚC 3: Dùng FFmpeg lọc và nén sang MP3 chuẩn cơm mẹ nấu
         ffmpeg(response.data)
             .audioCodec('libmp3lame')
-            .audioBitrate(128)      // 128kbps (Chuẩn)
-            .audioChannels(2)       // Stereo
-            .audioFrequency(44100)  // 44.1kHz (Cực quan trọng để tránh lỗi -6)
-            .format('mp3')          // Ép chặt là MP3
-            .outputOptions([
-                '-vn',              // Bỏ Video
-                '-map_metadata', '-1', // Xóa sạch thông tin rác (Cover, Tên bài..) để nhẹ header
-                '-preset', 'ultrafast' // Nén siêu nhanh
-            ])
+            .audioBitrate(128)
+            .audioChannels(2)
+            .audioFrequency(44100)
+            .format('mp3')
+            .outputOptions(['-vn', '-map_metadata', '-1', '-preset', 'ultrafast'])
             .on('error', err => {
-                // Chỉ log lỗi nếu không phải do ESP32 ngắt kết nối
-                if (!err.message.includes('Output stream closed')) {
-                    console.error('🔥 FFmpeg error:', err.message);
-                }
+                if (!err.message.includes('Output stream closed')) console.error('🔥 FFmpeg error:', err.message);
             })
-            .pipe(res, { end: true }); // Bơm về ESP32
+            .pipe(res, { end: true });
 
     } catch (e) {
-        console.error("❌ Lỗi Axios Stream:", e.message);
+        console.error("❌ Lỗi Axios:", e.message);
         if (!res.headersSent) res.status(502).send('Stream Error');
     }
 });
 
-// Test
-app.get('/', (req, res) => { res.send('SERVER FINAL (AXIOS + FFMPEG CLEAN) 🚀'); });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+function startServer() {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
