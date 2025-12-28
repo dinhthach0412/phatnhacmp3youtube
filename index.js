@@ -1,116 +1,85 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
+const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 
 const app = express();
 app.use(cors());
 
-// --- DANH SÁCH "VÉT CẠN" (Mix giữa Piped và các Mirror lạ) ---
-// Server lạ thường ít chặn IP Render hơn server nổi tiếng
-const PIPED_INSTANCES = [
-    "https://pipedapi.tokhmi.xyz",       // Server này thường dễ tính
-    "https://api.piped.privacydev.net",
-    "https://pipedapi.smnz.de",
-    "https://api.piped.ug",
-    "https://pipedapi.adminforge.de",
-    "https://pipedapi.ducks.party",
-    "https://api.piped.projectsegfau.lt",
-    "https://pipedapi.kavin.rocks",      // Để lại nhưng xếp sau
-    "https://api.piped.yt",
-    "https://pipedapi.moomoo.me",
-    "https://piped-api.garudalinux.org",
-    "https://pa.il.ax",
-    "https://pipedapi.r4fo.com",
-    "https://api.piped.sh"
-];
+// Hàm dùng yt-dlp để tìm link nhạc trực tiếp từ Youtube
+function getYtDlpLink(query) {
+    return new Promise((resolve, reject) => {
+        // Lệnh: yt-dlp "ytsearch1:tên bài hát" --get-url -f bestaudio
+        const ytDlp = spawn('yt-dlp', [
+            `ytsearch1:${query}`, // Tìm video đầu tiên
+            '-f', 'bestaudio',    // Lấy file âm thanh tốt nhất (m4a/webm)
+            '--get-url',          // Chỉ lấy link, không tải file
+            '--no-warnings'       // Tắt cảnh báo cho sạch log
+        ]);
 
-// Hàm tìm link gốc
-async function getOriginalStream(query) {
-    // Fake User-Agent random để tránh bị phát hiện là 1 bot cố định
-    const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ];
+        let outputUrl = '';
 
-    for (const baseUrl of PIPED_INSTANCES) {
-        try {
-            const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
-            const headers = { 'User-Agent': randomAgent };
-            
-            console.log(`Trying: ${baseUrl}...`);
-            
-            // 1. Tìm kiếm (Bỏ filter music_songs để tìm rộng hơn, tránh bị trả về rỗng)
-            const searchRes = await axios.get(`${baseUrl}/search`, {
-                params: { q: query }, // Bỏ filter để dễ tìm ra kết quả hơn
-                headers: headers,
-                timeout: 3500 // Giảm timeout xuống để lướt qua server chết nhanh hơn
-            });
+        ytDlp.stdout.on('data', (data) => {
+            outputUrl += data.toString().trim();
+        });
 
-            if (!searchRes.data.items || searchRes.data.items.length === 0) {
-                // console.log(`   -> ${baseUrl}: Không có kết quả.`);
-                continue;
+        ytDlp.stderr.on('data', (data) => {
+            console.error(`yt-dlp log: ${data}`);
+        });
+
+        ytDlp.on('close', (code) => {
+            if (code === 0 && outputUrl) {
+                // yt-dlp đôi khi trả về nhiều link, chỉ lấy dòng đầu tiên
+                const finalUrl = outputUrl.split('\n')[0];
+                resolve(finalUrl);
+            } else {
+                reject(new Error(`yt-dlp exited with code ${code}`));
             }
-
-            // Lọc lấy video đầu tiên (bỏ qua playlist/channel)
-            const video = searchRes.data.items.find(item => item.type === 'stream');
-            if (!video) continue;
-
-            const videoId = video.url.split("/watch?v=")[1];
-            
-            // 2. Lấy link stream
-            const streamRes = await axios.get(`${baseUrl}/streams/${videoId}`, { 
-                headers: headers,
-                timeout: 3500 
-            });
-            const audioStreams = streamRes.data.audioStreams;
-
-            // Ưu tiên lấy m4a
-            let bestAudio = audioStreams.find(s => s.mimeType.includes("audio/mp4"));
-            if (!bestAudio) bestAudio = audioStreams.sort((a, b) => b.bitrate - a.bitrate)[0];
-
-            if (bestAudio) {
-                console.log(`✅ THÀNH CÔNG TẠI: ${baseUrl} | Bài: ${video.title}`);
-                return { title: video.title, artist: "Youtube", url: bestAudio.url };
-            }
-        } catch (e) {
-            // Không in lỗi chi tiết nữa để đỡ rác log, chỉ in mã lỗi
-            const status = e.response ? e.response.status : e.code;
-            console.log(`   ❌ Fail: ${baseUrl} (${status})`);
-        }
-    }
-    return null;
+        });
+    });
 }
 
-// API 1: TÌM KIẾM
+// API 1: TÌM KIẾM (Dùng yt-dlp)
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        console.log("🔍 ESP32 đang tìm:", query);
-        const result = await getOriginalStream(query);
+        console.log("🔍 ESP32 đang tìm (yt-dlp):", query);
         
-        if (result) {
-            const myServerUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(result.url)}`;
-            return res.json({ success: true, title: result.title, artist: result.artist, url: myServerUrl });
-        } else {
-            console.log("💀 CHẾT CẢ DÀN SERVER: Không tìm được bài nào.");
-            return res.status(404).json({ error: "All servers failed" });
-        }
-    } catch (e) { res.status(500).json({ error: "Server Error" }); }
+        // 1. Lấy link stream từ yt-dlp
+        const audioUrl = await getYtDlpLink(query);
+        console.log("✅ yt-dlp tìm thấy link:", audioUrl.substring(0, 50) + "...");
+
+        // 2. Tạo link HTTPS của server mình để trả về cho ESP32
+        // Lưu ý: Mình fake tiêu đề là chính query vì yt-dlp lấy title hơi chậm, 
+        // mục tiêu là tốc độ.
+        const myServerUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(audioUrl)}`;
+        
+        return res.json({ 
+            success: true, 
+            title: query,       // Tạm thời lấy tên bài là từ khóa tìm kiếm
+            artist: "Youtube", 
+            url: myServerUrl 
+        });
+
+    } catch (e) { 
+        console.error("❌ yt-dlp thất bại:", e.message);
+        res.status(500).json({ error: "Server Error" }); 
+    }
 });
 
-// API 2: STREAM (DÙNG AXIOS TẢI -> PIPE VÀO FFMPEG)
+// API 2: STREAM (Dùng Axios tải -> Pipe vào FFmpeg)
+const axios = require('axios'); // Nhớ cài axios: npm install axios
 app.get('/stream', async (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) return res.status(400).send("No URL provided");
 
-    console.log("🚀 Transcode (Axios -> FFmpeg)...");
+    console.log("🚀 Transcode (Direct -> FFmpeg)...");
     
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
     try {
+        // yt-dlp trả về link google, ta dùng axios hút nó về rồi bơm vào ffmpeg
         const response = await axios({
             method: 'get',
             url: audioUrl,
@@ -140,7 +109,11 @@ app.get('/stream', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => { res.send('SERVER ALIVE (MULTI-MIRROR) 🚀'); });
+// Các API phụ giữ nguyên
+app.get('/coin', async (req, res) => { res.json({ text: "Giá Coin Demo" }); });
+app.get('/gold', async (req, res) => { res.json({ text: "Giá Vàng Demo" }); });
+app.get('/weather', async (req, res) => { res.json({ text: "Thời tiết Demo" }); });
+app.get('/', (req, res) => { res.send('SERVER ALIVE (YT-DLP CORE) 🚀'); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
