@@ -6,7 +6,6 @@ const ffmpeg = require('fluent-ffmpeg');
 const app = express();
 app.use(cors());
 
-// --- DANH SÁCH SERVER PIPED ---
 const PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://piped-api.garudalinux.org",
@@ -14,7 +13,6 @@ const PIPED_INSTANCES = [
     "https://pipedapi.moomoo.me"
 ];
 
-// Hàm tìm link gốc (AAC/M4A)
 async function getOriginalStream(query) {
     for (const baseUrl of PIPED_INSTANCES) {
         try {
@@ -32,7 +30,6 @@ async function getOriginalStream(query) {
             const streamRes = await axios.get(`${baseUrl}/streams/${videoId}`, { timeout: 3000 });
             const audioStreams = streamRes.data.audioStreams;
 
-            // Lấy link M4A hoặc bitrate cao nhất
             let bestAudio = audioStreams.find(s => s.mimeType.includes("audio/mp4"));
             if (!bestAudio) bestAudio = audioStreams.sort((a, b) => b.bitrate - a.bitrate)[0];
 
@@ -46,7 +43,7 @@ async function getOriginalStream(query) {
     return null;
 }
 
-// --- API 1: TÌM KIẾM (Robot gọi cái này) ---
+// --- API 1: TÌM KIẾM ---
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
@@ -55,15 +52,15 @@ app.get('/search', async (req, res) => {
         const result = await getOriginalStream(query);
         
         if (result) {
-            // Thay vì trả về link Youtube, ta trả về link của CHÍNH SERVER NÀY
-            // Để server này làm nhiệm vụ chuyển đổi sang MP3
-            const myServerUrl = `${req.protocol}://${req.get('host')}/stream?url=${encodeURIComponent(result.url)}`;
+            // --- SỬA LỖI 301 TẠI ĐÂY ---
+            // Thay req.protocol bằng 'https' cứng
+            const myServerUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(result.url)}`;
             
             return res.json({ 
                 success: true, 
                 title: result.title, 
                 artist: result.artist,
-                url: myServerUrl // Robot sẽ gọi lại route /stream ở dưới
+                url: myServerUrl 
             });
         } else {
             return res.status(404).json({ error: "Not found" });
@@ -71,21 +68,18 @@ app.get('/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// --- API 2: STREAM & CONVERT TO MP3 (Quan trọng nhất) ---
+// --- API 2: STREAM & CONVERT ---
 app.get('/stream', (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) return res.status(400).send("No URL provided");
 
     console.log("Đang Transcode sang MP3...");
-
-    // Thiết lập Header để Robot hiểu đây là file MP3
     res.setHeader('Content-Type', 'audio/mpeg');
 
-    // Dùng FFmpeg chuyển đổi AAC -> MP3 và stream thẳng cho Robot
     ffmpeg(audioUrl)
         .format('mp3')
         .audioCodec('libmp3lame')
-        .audioBitrate(128) // 128kbps là đủ cho ESP32
+        .audioBitrate(128)
         .on('error', (err) => {
             console.error('Lỗi Transcode:', err.message);
             if (!res.headersSent) res.status(500).send('Stream Error');
@@ -93,20 +87,11 @@ app.get('/stream', (req, res) => {
         .pipe(res, { end: true });
 });
 
-// --- API GIÁ VÀNG/COIN GIỮ NGUYÊN ---
-app.get('/coin', async (req, res) => { /* Giữ nguyên code cũ của bạn */ 
-    res.json({ text: "Giá Coin Demo" }); 
-});
-app.get('/gold', async (req, res) => { 
-    res.json({ text: "Giá Vàng Demo" }); 
-});
-app.get('/weather', async (req, res) => { 
-    res.json({ text: "Thời tiết Demo" }); 
-});
-// Thêm Cửa Chính (Trang chủ)
-app.get('/', (req, res) => {
-    res.send('SERVER XIAOZHI VIETNAM (FFMPEG) ĐANG CHẠY NGON LÀNH! 🚀');
-});
+// API phụ
+app.get('/coin', async (req, res) => { res.json({ text: "Giá Coin Demo" }); });
+app.get('/gold', async (req, res) => { res.json({ text: "Giá Vàng Demo" }); });
+app.get('/weather', async (req, res) => { res.json({ text: "Thời tiết Demo" }); });
+app.get('/', (req, res) => { res.send('SERVER OK (HTTPS FIXED) 🚀'); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server MP3 Converter running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
