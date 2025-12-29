@@ -9,7 +9,7 @@ app.use(cors());
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Đang khởi động...";
-let provider = "SoundCloud (STABLE STREAM)";
+let provider = "SoundCloud (LITE MODE 64kbps)";
 let lastLog = "Chưa có yêu cầu";
 
 // --- 0. UPDATE YT-DLP ---
@@ -22,6 +22,7 @@ function getAudioUrl(query) {
         lastLog = `🔍 Đang tìm SC: ${query}`;
         const args = [
             `scsearch1:${query}`, 
+            // Vẫn cấm OPUS
             '-f', 'http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]', 
             '--get-url',
             '--no-playlist',
@@ -62,7 +63,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (FIX VỤN VẶT & WATCHDOG) ---
+// --- API STREAM (GIẢM TẢI CPU CHO ESP32) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -71,9 +72,9 @@ app.get('/stream', async (req, res) => {
     if (!audioUrl) return res.status(404).send("Not found");
 
     res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Transfer-Encoding', 'chunked'); // Nodejs tự xử lý chunk
+    res.setHeader('Transfer-Encoding', 'chunked');
     
-    console.log("🚀 FFmpeg: Streaming (Buffered)...");
+    console.log("🚀 FFmpeg: Lite Stream (64k)...");
 
     ffmpeg(audioUrl)
         .inputOptions([
@@ -85,28 +86,30 @@ app.get('/stream', async (req, res) => {
             '-user_agent "Mozilla/5.0"' 
         ])
         .audioFilters([
-            'volume=2.5' // Giữ nguyên kích âm
+            'volume=2.5' // Vẫn giữ to mồm
         ])
         .audioCodec('libmp3lame')
-        .audioBitrate(128)
+        
+        // --- GIẢM BITRATE XUỐNG 64K ---
+        // Hy sinh một chút độ nét của nhạc để cứu sống CPU ESP32
+        .audioBitrate(64)       
         .audioChannels(2)
         .audioFrequency(44100)
         .format('mp3')
         
-        // --- CẤU HÌNH ĐẦU RA ĐỂ TRÁNH VỤN VẶT ---
+        // --- CẤU HÌNH AN TOÀN ---
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0',
             '-write_id3v1', '0',
-            '-write_xing', '0', // Vẫn giữ xóa Xing để chống crash
+            '-write_xing', '0', // Chống Crash
             
-            // QUAN TRỌNG: Cấm xả gói tin liên tục
-            '-flush_packets', '0', 
+            '-flush_packets', '0', // Gom gói tin
             
-            // Ép kích thước gói tin MP3 tối thiểu (để không bị vụn 2-3 bytes)
-            '-minrate', '128k',
-            '-maxrate', '128k',
-            '-bufsize', '64k', // Buffer 64KB
+            // Giới hạn băng thông chuẩn 64k
+            '-minrate', '64k',
+            '-maxrate', '64k',
+            '-bufsize', '32k', // Giảm buffer xuống cho nhẹ
 
             '-preset', 'ultrafast',
             '-movflags', 'frag_keyframe+empty_moov'
