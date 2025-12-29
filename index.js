@@ -9,7 +9,7 @@ app.use(cors());
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Đang khởi động...";
-let provider = "SoundCloud (Clean Stream)";
+let provider = "SoundCloud (NO-OPUS MODE)";
 let lastLog = "Chưa có yêu cầu";
 
 // --- 0. UPDATE YT-DLP ---
@@ -23,7 +23,12 @@ function getAudioUrl(query) {
         
         const args = [
             `scsearch1:${query}`, 
-            '-f', 'http_mp3_128/bestaudio', 
+            
+            // --- KHU VỰC QUAN TRỌNG: CẤM OPUS ---
+            // Ý nghĩa: Ưu tiên mp3_128 -> Nếu không có thì lấy M4A -> CẤM định dạng OPUS
+            '-f', 'http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]', 
+            // ------------------------------------
+            
             '--get-url',
             '--no-playlist',
             '--no-warnings',
@@ -66,7 +71,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (BẢN SỬA LỖI CRASH) ---
+// --- API STREAM (FIX LỖI INVALID DATA) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -78,32 +83,37 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
     
-    console.log("🚀 FFmpeg: Cleaning & Streaming...");
+    console.log("🚀 FFmpeg: Xử lý link (Bỏ qua Opus)...");
 
     ffmpeg(audioUrl)
         .inputOptions([
             '-reconnect 1',             
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
+            
+            // --- THÊM 2 DÒNG NÀY ĐỂ FFMPEG ĐỌC KỸ HƠN ---
+            '-analyzeduration 10000000', // Đọc kỹ đầu vào 10MB
+            '-probesize 10000000',       // Tăng bộ đệm dò tìm định dạng
+            // --------------------------------------------
+            
             '-user_agent "Mozilla/5.0"' 
+        ])
+        .audioFilters([
+            'volume=2.5'  // Vẫn giữ Kích âm lượng
         ])
         .audioCodec('libmp3lame')
         .audioBitrate(128)
         .audioChannels(2)
         .audioFrequency(44100)
         .format('mp3')
-        
-        // --- KHU VỰC QUAN TRỌNG NHẤT (SỬA LỖI CRASH) ---
         .outputOptions([
-            '-vn',                  // Bỏ Video/Ảnh bìa
-            '-map_metadata', '-1',  // Xóa metadata toàn cục
-            '-id3v2_version', '0',  // CẤM tạo ID3v2 header (Nguyên nhân chính gây crash)
-            '-write_id3v1', '0',    // CẤM tạo ID3v1 trailer
+            '-vn',                  
+            '-map_metadata', '-1',  
+            '-id3v2_version', '0',  // Vẫn giữ Chống Crash
+            '-write_id3v1', '0',    
             '-preset', 'ultrafast',
             '-movflags', 'frag_keyframe+empty_moov'
         ])
-        // ------------------------------------------------
-        
         .on('error', (err) => {
             if (!err.message.includes('Output stream closed')) {
                 console.error('🔥 FFmpeg Error:', err.message);
