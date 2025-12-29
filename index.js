@@ -9,26 +9,20 @@ app.use(cors());
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Đang khởi động...";
-let provider = "SoundCloud (NO-OPUS MODE)";
+let provider = "SoundCloud (STABLE STREAM)";
 let lastLog = "Chưa có yêu cầu";
 
 // --- 0. UPDATE YT-DLP ---
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
 updateProcess.on('close', () => { serverStatus = "Sẵn sàng (Ready)"; });
 
-// --- 1. HÀM LẤY LINK TỪ SOUNDCLOUD ---
+// --- 1. HÀM LẤY LINK SC ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
         lastLog = `🔍 Đang tìm SC: ${query}`;
-        
         const args = [
             `scsearch1:${query}`, 
-            
-            // --- KHU VỰC QUAN TRỌNG: CẤM OPUS ---
-            // Ý nghĩa: Ưu tiên mp3_128 -> Nếu không có thì lấy M4A -> CẤM định dạng OPUS
             '-f', 'http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]', 
-            // ------------------------------------
-            
             '--get-url',
             '--no-playlist',
             '--no-warnings',
@@ -36,7 +30,6 @@ function getAudioUrl(query) {
         ];
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
-
         let url = '';
         let err = '';
 
@@ -59,9 +52,7 @@ function getAudioUrl(query) {
 }
 
 // --- 2. GIAO DIỆN WEB ---
-app.get('/', (req, res) => {
-    res.send(`Server OK - ${serverStatus}`);
-});
+app.get('/', (req, res) => { res.send(`Server OK - ${serverStatus}`); });
 
 // --- API SEARCH ---
 app.get('/search', async (req, res) => {
@@ -71,53 +62,57 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (FIX LỖI INVALID DATA) ---
+// --- API STREAM (FIX VỤN VẶT & WATCHDOG) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
 
     const audioUrl = await getAudioUrl(q);
-    
     if (!audioUrl) return res.status(404).send("Not found");
 
     res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Transfer-Encoding', 'chunked'); // Nodejs tự xử lý chunk
     
-    console.log("🚀 FFmpeg: Xử lý link (Bỏ qua Opus)...");
+    console.log("🚀 FFmpeg: Streaming (Buffered)...");
 
     ffmpeg(audioUrl)
         .inputOptions([
             '-reconnect 1',             
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
-            
-            // --- THÊM 2 DÒNG NÀY ĐỂ FFMPEG ĐỌC KỸ HƠN ---
-            '-analyzeduration 10000000', // Đọc kỹ đầu vào 10MB
-            '-probesize 10000000',       // Tăng bộ đệm dò tìm định dạng
-            // --------------------------------------------
-            
+            '-analyzeduration 15000000',
+            '-probesize 15000000',
             '-user_agent "Mozilla/5.0"' 
         ])
         .audioFilters([
-            'volume=2.5'  // Vẫn giữ Kích âm lượng
+            'volume=2.5' // Giữ nguyên kích âm
         ])
         .audioCodec('libmp3lame')
         .audioBitrate(128)
         .audioChannels(2)
         .audioFrequency(44100)
         .format('mp3')
+        
+        // --- CẤU HÌNH ĐẦU RA ĐỂ TRÁNH VỤN VẶT ---
         .outputOptions([
-            '-vn',                  
-            '-map_metadata', '-1',  
-            '-id3v2_version', '0',  // Vẫn giữ Chống Crash
-            '-write_id3v1', '0',    
+            '-vn', '-map_metadata', '-1',
+            '-id3v2_version', '0',
+            '-write_id3v1', '0',
+            '-write_xing', '0', // Vẫn giữ xóa Xing để chống crash
+            
+            // QUAN TRỌNG: Cấm xả gói tin liên tục
+            '-flush_packets', '0', 
+            
+            // Ép kích thước gói tin MP3 tối thiểu (để không bị vụn 2-3 bytes)
+            '-minrate', '128k',
+            '-maxrate', '128k',
+            '-bufsize', '64k', // Buffer 64KB
+
             '-preset', 'ultrafast',
             '-movflags', 'frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
-            if (!err.message.includes('Output stream closed')) {
-                console.error('🔥 FFmpeg Error:', err.message);
-            }
+            if (!err.message.includes('Output stream closed')) console.error('🔥 FFmpeg:', err.message);
         })
         .pipe(res, { end: true });
 });
