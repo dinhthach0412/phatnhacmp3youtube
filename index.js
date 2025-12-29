@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
-// BỎ AXIOS ĐI, KHÔNG CẦN DÙNG NỮA
 const fs = require('fs');
 
 const app = express();
@@ -10,7 +9,7 @@ app.use(cors());
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Đang khởi động...";
-let provider = "SoundCloud (FFmpeg Direct)";
+let provider = "SoundCloud (Clean Stream)";
 let lastLog = "Chưa có yêu cầu";
 
 // --- 0. UPDATE YT-DLP ---
@@ -24,7 +23,6 @@ function getAudioUrl(query) {
         
         const args = [
             `scsearch1:${query}`, 
-            // Thử ép lấy link HTTP MP3 (progressive) trước, nếu không có thì lấy HLS (m3u8)
             '-f', 'http_mp3_128/bestaudio', 
             '--get-url',
             '--no-playlist',
@@ -44,10 +42,10 @@ function getAudioUrl(query) {
             if (code === 0 && url.trim()) {
                 const finalUrl = url.trim().split('\n')[0];
                 lastLog = `✅ Tìm thấy: ${query}`;
-                console.log(`Link SC Gốc: ${finalUrl}`);
+                console.log(`Link Gốc: ${finalUrl}`);
                 resolve(finalUrl);
             } else {
-                lastLog = `❌ Không thấy: ${err.substring(0, 50)}...`;
+                lastLog = `❌ Lỗi: ${err.substring(0, 50)}...`;
                 console.error(err);
                 resolve(null);
             }
@@ -57,30 +55,7 @@ function getAudioUrl(query) {
 
 // --- 2. GIAO DIỆN WEB ---
 app.get('/', (req, res) => {
-    res.send(`
-    <!DOCTYPE html>
-    <html lang="vi">
-    <head>
-        <title>Music Server</title>
-        <style>
-            body { background-color: #f2f2f2; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background: white; padding: 2rem; border-radius: 12px; width: 320px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-            h1 { color: #ff5500; } 
-            .stat { background: #eee; padding: 8px; border-radius: 4px; margin: 5px 0; text-align: left; font-size: 0.9em; }
-            .green { color: #28a745 !important; }
-            .log { margin-top: 15px; font-size: 0.8em; color: #666; border-top: 1px solid #ddd; padding-top: 10px; word-break: break-all; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>☁️ SoundCloud</h1>
-            <div class="stat">Trạng thái <b class="green">${serverStatus}</b></div>
-            <div class="stat">Mode <b>${provider}</b></div>
-            <div class="log">${lastLog}</div>
-        </div>
-    </body>
-    </html>
-    `);
+    res.send(`Server OK - ${serverStatus}`);
 });
 
 // --- API SEARCH ---
@@ -91,7 +66,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (BỎ AXIOS - DÙNG FFMPEG TRỰC TIẾP) ---
+// --- API STREAM (BẢN SỬA LỖI CRASH) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -100,31 +75,35 @@ app.get('/stream', async (req, res) => {
     
     if (!audioUrl) return res.status(404).send("Not found");
 
-    // Thiết lập Header để ESP32 không bị ngắt quãng
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
     
-    console.log("🚀 FFmpeg đang xử lý link: " + audioUrl.substring(0, 30) + "...");
+    console.log("🚀 FFmpeg: Cleaning & Streaming...");
 
-    // QUAN TRỌNG: Đưa thẳng Link URL vào FFmpeg (để nó tự xử lý m3u8)
     ffmpeg(audioUrl)
         .inputOptions([
-            '-reconnect 1',             // Tự kết nối lại nếu rớt mạng
+            '-reconnect 1',             
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
-            '-user_agent "Mozilla/5.0"' // Fake User Agent để SC không chặn
+            '-user_agent "Mozilla/5.0"' 
         ])
         .audioCodec('libmp3lame')
         .audioBitrate(128)
         .audioChannels(2)
         .audioFrequency(44100)
         .format('mp3')
+        
+        // --- KHU VỰC QUAN TRỌNG NHẤT (SỬA LỖI CRASH) ---
         .outputOptions([
-            '-vn', 
-            '-map_metadata', '-1', 
+            '-vn',                  // Bỏ Video/Ảnh bìa
+            '-map_metadata', '-1',  // Xóa metadata toàn cục
+            '-id3v2_version', '0',  // CẤM tạo ID3v2 header (Nguyên nhân chính gây crash)
+            '-write_id3v1', '0',    // CẤM tạo ID3v1 trailer
             '-preset', 'ultrafast',
-            '-movflags', 'frag_keyframe+empty_moov' // Cực quan trọng cho Stream
+            '-movflags', 'frag_keyframe+empty_moov'
         ])
+        // ------------------------------------------------
+        
         .on('error', (err) => {
             if (!err.message.includes('Output stream closed')) {
                 console.error('🔥 FFmpeg Error:', err.message);
