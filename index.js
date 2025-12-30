@@ -11,7 +11,7 @@ let serverStatus = "Booting...";
 
 // Update yt-dlp
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Standard 44.1kHz)"; });
+updateProcess.on('close', () => { serverStatus = "Online (Volume 2.0 - Clear Sound)"; });
 
 // --- HÀM LẤY LINK ---
 function getAudioUrl(query) {
@@ -23,8 +23,8 @@ function getAudioUrl(query) {
         console.log(`🔍 Tìm: "${finalQuery}"`);
         
         const args = [
-            `scsearch1:${finalQuery}`, 
-            '-f', 'bestaudio/best', 
+            `scsearch1:${finalQuery}`, // Tìm 1 bài cho nhanh
+            '-f', 'bestaudio/best',    // Lấy mọi định dạng tốt nhất
             '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
         ];
 
@@ -46,7 +46,7 @@ function getAudioUrl(query) {
     });
 }
 
-app.get('/', (req, res) => res.send(`Server Standard - ${serverStatus}`));
+app.get('/', (req, res) => res.send(`Server Audio 2.0 - ${serverStatus}`));
 
 app.get('/search', async (req, res) => {
     const q = req.query.q;
@@ -55,7 +55,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (CHUẨN 44.1kHz - KHÔNG BAO GIỜ MÉO TIẾNG) ---
+// --- API STREAM (CẤU HÌNH CHUẨN - KHÔNG RÈ) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -66,7 +66,7 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Transcoding to 44.1kHz...");
+    console.log("🚀 Streaming (Vol 2.0)...");
 
     ffmpeg(audioUrl)
         .inputOptions([
@@ -74,13 +74,15 @@ app.get('/stream', async (req, res) => {
             '-probesize 128000',
             '-user_agent "Mozilla/5.0"'
         ])
-        .audioFilters(['volume=2'])
-        .audioCodec('libmp3lame')
         
-        // --- QUAY VỀ CHUẨN 44100HZ (AN TOÀN NHẤT) ---
+        // --- CHỈNH VOLUME TẠI ĐÂY ---
+        .audioFilters(['volume=2.0']) // Giảm từ 2.5 xuống 2.0 cho đỡ rè
+        // ---------------------------
+        
+        .audioCodec('libmp3lame')
         .audioBitrate(64)       
         .audioChannels(2)
-        .audioFrequency(44100) 
+        .audioFrequency(44100) // Giữ 44.1kHz cho tiếng trong trẻo
         .format('mp3')
         
         .outputOptions([
