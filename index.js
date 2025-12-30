@@ -12,12 +12,12 @@ let lastQuery = "Chưa có";
 
 // Update yt-dlp
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Balanced Mode)"; });
+updateProcess.on('close', () => { serverStatus = "Online (Universal Mode)"; });
 
-// --- HÀM LẤY LINK ---
+// --- HÀM LẤY LINK (LẤY TẤT CẢ ĐỊNH DẠNG) ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
-        // Lọc từ khóa rác
+        // 1. Lọc từ khóa rác (Giữ nguyên vì đang tốt)
         let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
@@ -25,9 +25,17 @@ function getAudioUrl(query) {
         console.log(`🔍 Tìm: "${finalQuery}"`);
         
         const args = [
-            `scsearch5:${finalQuery}`, // Tìm kỹ 5 bài
-            '-f', 'http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]', 
-            '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
+            `scsearch1:${finalQuery}`, // Tìm 1 bài (Nhanh)
+            
+            // [THAY ĐỔI QUAN TRỌNG] "bestaudio/best" 
+            // -> Có gì lấy đó, kể cả m3u8, opus. FFmpeg sẽ lo phần còn lại.
+            '-f', 'bestaudio/best', 
+            
+            '--get-url',
+            '--no-playlist',
+            '--no-warnings',
+            '--force-ipv4',
+            '--no-check-certificate'
         ];
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
@@ -38,17 +46,17 @@ function getAudioUrl(query) {
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
                 const finalUrl = url.trim().split('\n')[0];
-                console.log(`✅ Link: ${finalUrl}`);
+                console.log(`✅ Link Gốc: ${finalUrl}`);
                 resolve(finalUrl);
             } else {
-                console.log("❌ Not Found");
+                console.log("❌ Không tìm thấy link nào.");
                 resolve(null);
             }
         });
     });
 }
 
-app.get('/', (req, res) => res.send(`Server Balanced - ${serverStatus}`));
+app.get('/', (req, res) => res.send(`Server Universal - ${serverStatus}`));
 
 app.get('/search', async (req, res) => {
     const q = req.query.q;
@@ -57,7 +65,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (CÂN BẰNG GIỮA TỐC ĐỘ VÀ ỔN ĐỊNH) ---
+// --- API STREAM (FFmpeg Gánh Team) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -68,18 +76,18 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Streaming (Balanced 64k)...");
+    console.log("🚀 Transcoding...");
 
     ffmpeg(audioUrl)
         .inputOptions([
             '-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5',
-            '-probesize 128000',
+            '-probesize 64000', // Giảm probe để load nhanh hơn
             '-user_agent "Mozilla/5.0"'
         ])
         .audioFilters(['volume=2.5'])
         .audioCodec('libmp3lame')
         
-        // --- CHUẨN 64KBPS + 24KHZ (KHỚP GIỌNG ROBOT) ---
+        // --- GIỮ NGUYÊN 24kHz + 64kbps (Chuẩn nhất cho ESP32 của bạn) ---
         .audioBitrate(64)       
         .audioChannels(2)
         .audioFrequency(24000) 
@@ -88,12 +96,8 @@ app.get('/stream', async (req, res) => {
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
-            
-            // --- CẤU HÌNH QUAN TRỌNG: CHỮA LỖI CHUNK FAILED ---
-            '-flush_packets', '1',  // Cho phép xả gói tin ngay lập tức (Chống timeout)
-            '-bufsize', '64k',      // Giảm buffer xuống 64k (Vừa miếng)
-            // --------------------------------------------------
-
+            '-flush_packets', '1',  // Xả hàng ngay lập tức
+            '-bufsize', '64k',      
             '-minrate', '64k', '-maxrate', '64k', 
             '-preset', 'ultrafast',
             '-movflags', 'frag_keyframe+empty_moov'
