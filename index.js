@@ -8,34 +8,24 @@ app.use(cors());
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Booting...";
-let lastQuery = "Chưa có";
 
 // Update yt-dlp
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Universal Mode)"; });
+updateProcess.on('close', () => { serverStatus = "Online (Standard 44.1kHz)"; });
 
-// --- HÀM LẤY LINK (LẤY TẤT CẢ ĐỊNH DẠNG) ---
+// --- HÀM LẤY LINK ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
-        // 1. Lọc từ khóa rác (Giữ nguyên vì đang tốt)
+        // Lọc từ khóa rác
         let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
-        lastQuery = finalQuery;
         console.log(`🔍 Tìm: "${finalQuery}"`);
         
         const args = [
-            `scsearch1:${finalQuery}`, // Tìm 1 bài (Nhanh)
-            
-            // [THAY ĐỔI QUAN TRỌNG] "bestaudio/best" 
-            // -> Có gì lấy đó, kể cả m3u8, opus. FFmpeg sẽ lo phần còn lại.
+            `scsearch1:${finalQuery}`, 
             '-f', 'bestaudio/best', 
-            
-            '--get-url',
-            '--no-playlist',
-            '--no-warnings',
-            '--force-ipv4',
-            '--no-check-certificate'
+            '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
         ];
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
@@ -46,17 +36,17 @@ function getAudioUrl(query) {
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
                 const finalUrl = url.trim().split('\n')[0];
-                console.log(`✅ Link Gốc: ${finalUrl}`);
+                console.log(`✅ Link: ${finalUrl}`);
                 resolve(finalUrl);
             } else {
-                console.log("❌ Không tìm thấy link nào.");
+                console.log("❌ Not Found");
                 resolve(null);
             }
         });
     });
 }
 
-app.get('/', (req, res) => res.send(`Server Universal - ${serverStatus}`));
+app.get('/', (req, res) => res.send(`Server Standard - ${serverStatus}`));
 
 app.get('/search', async (req, res) => {
     const q = req.query.q;
@@ -65,7 +55,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (FFmpeg Gánh Team) ---
+// --- API STREAM (CHUẨN 44.1kHz - KHÔNG BAO GIỜ MÉO TIẾNG) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -76,27 +66,27 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Transcoding...");
+    console.log("🚀 Transcoding to 44.1kHz...");
 
     ffmpeg(audioUrl)
         .inputOptions([
             '-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5',
-            '-probesize 64000', // Giảm probe để load nhanh hơn
+            '-probesize 128000',
             '-user_agent "Mozilla/5.0"'
         ])
-        .audioFilters(['volume=2.5'])
+        .audioFilters(['volume=2'])
         .audioCodec('libmp3lame')
         
-        // --- GIỮ NGUYÊN 24kHz + 64kbps (Chuẩn nhất cho ESP32 của bạn) ---
+        // --- QUAY VỀ CHUẨN 44100HZ (AN TOÀN NHẤT) ---
         .audioBitrate(64)       
         .audioChannels(2)
-        .audioFrequency(24000) 
+        .audioFrequency(44100) 
         .format('mp3')
         
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
-            '-flush_packets', '1',  // Xả hàng ngay lập tức
+            '-flush_packets', '1',
             '-bufsize', '64k',      
             '-minrate', '64k', '-maxrate', '64k', 
             '-preset', 'ultrafast',
