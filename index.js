@@ -12,34 +12,22 @@ let lastQuery = "Chưa có";
 
 // Update yt-dlp
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Smart Speed Mode)"; });
+updateProcess.on('close', () => { serverStatus = "Online (Balanced Mode)"; });
 
-// --- HÀM LẤY LINK (CÓ XỬ LÝ TỪ KHÓA) ---
+// --- HÀM LẤY LINK ---
 function getAudioUrl(query) {
     return new Promise((resolve, reject) => {
-        // 1. LỌC TỪ KHÓA RÁC (Quan trọng)
-        // Loại bỏ: youtube, zing, bài hát, phát nhạc... để SoundCloud tìm chuẩn hơn
-        let cleanQuery = query.toLowerCase()
-            .replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "")
-            .trim();
-            
-        // Nếu xóa hết trơn thì lấy lại từ gốc, còn không thì dùng từ đã lọc
+        // Lọc từ khóa rác
+        let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
-
+        
         lastQuery = finalQuery;
-        console.log(`🔍 Gốc: "${query}" -> Tìm: "${finalQuery}"`);
+        console.log(`🔍 Tìm: "${finalQuery}"`);
         
         const args = [
-            // QUAY LẠI TÌM 1 BÀI CHO NHANH (Tránh timeout lỗi -0x004C)
-            `scsearch1:${finalQuery}`, 
-            
-            // Cấu hình chuẩn
+            `scsearch5:${finalQuery}`, // Tìm kỹ 5 bài
             '-f', 'http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[acodec!=opus]', 
-            '--get-url',
-            '--no-playlist',
-            '--no-warnings',
-            '--force-ipv4',
-            '--no-check-certificate'
+            '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
         ];
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
@@ -50,17 +38,17 @@ function getAudioUrl(query) {
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
                 const finalUrl = url.trim().split('\n')[0];
-                console.log(`✅ Link OK: ${finalUrl}`);
+                console.log(`✅ Link: ${finalUrl}`);
                 resolve(finalUrl);
             } else {
-                console.log("❌ Không tìm thấy.");
+                console.log("❌ Not Found");
                 resolve(null);
             }
         });
     });
 }
 
-app.get('/', (req, res) => res.send(`Server Smart - ${serverStatus}`));
+app.get('/', (req, res) => res.send(`Server Balanced - ${serverStatus}`));
 
 app.get('/search', async (req, res) => {
     const q = req.query.q;
@@ -69,7 +57,7 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// --- API STREAM (24kHz + 64kbps + Buffer to) ---
+// --- API STREAM (CÂN BẰNG GIỮA TỐC ĐỘ VÀ ỔN ĐỊNH) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -80,7 +68,7 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Streaming (Smart Mode)...");
+    console.log("🚀 Streaming (Balanced 64k)...");
 
     ffmpeg(audioUrl)
         .inputOptions([
@@ -91,17 +79,22 @@ app.get('/stream', async (req, res) => {
         .audioFilters(['volume=2.5'])
         .audioCodec('libmp3lame')
         
-        // --- CHUẨN ỔN ĐỊNH ---
+        // --- CHUẨN 64KBPS + 24KHZ (KHỚP GIỌNG ROBOT) ---
         .audioBitrate(64)       
         .audioChannels(2)
-        .audioFrequency(24000) // Khớp giọng Robot
+        .audioFrequency(24000) 
         .format('mp3')
         
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
-            '-flush_packets', '0',
-            '-minrate', '64k', '-maxrate', '64k', '-bufsize', '128k', // Buffer to cho an toàn
+            
+            // --- CẤU HÌNH QUAN TRỌNG: CHỮA LỖI CHUNK FAILED ---
+            '-flush_packets', '1',  // Cho phép xả gói tin ngay lập tức (Chống timeout)
+            '-bufsize', '64k',      // Giảm buffer xuống 64k (Vừa miếng)
+            // --------------------------------------------------
+
+            '-minrate', '64k', '-maxrate', '64k', 
             '-preset', 'ultrafast',
             '-movflags', 'frag_keyframe+empty_moov'
         ])
