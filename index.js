@@ -9,23 +9,25 @@ const app = express();
 app.use(cors());
 
 // --- CẤU HÌNH ---
-// Đây là RSS của kênh "Giang Ơi Radio" chuẩn trên SoundCloud
-// Nếu RSS này lỗi, code bên dưới sẽ tự fallback sang tìm kiếm từ khóa chuẩn
-const RSS_GIANG_OI_RADIO = 'https://feeds.soundcloud.com/users/soundcloud:users:277689862/sounds.rss';
+// RSS CHUẨN CỦA GIANG ƠI RADIO (ID: 253460064)
+const RSS_GIANG_OI_RADIO = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
 
 let serverStatus = "Booting...";
 
-// Update yt-dlp khi khởi động
+// Update yt-dlp khi khởi động (Quan trọng để search SoundCloud luôn mượt)
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Giang Oi Radio Fixed)"; });
+updateProcess.on('close', () => { 
+    serverStatus = "Online (Lite Mode)"; 
+    console.log("✅ yt-dlp updated.");
+});
 
 // ============================================================
-// 1. TOOL: TÌM KIẾM NHANH (Dùng yt-dlp tại chỗ)
+// 1. TOOL: TÌM KIẾM NHANH (Dùng yt-dlp search SoundCloud)
 // ============================================================
 function getLinkFast(query) {
     return new Promise((resolve) => {
         // Lọc từ khóa rác
-        let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
+        let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của|tiktok/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
         console.log(`⚡ Tìm nhanh SC: "${finalQuery}"`);
@@ -44,7 +46,7 @@ function getLinkFast(query) {
         yt.on('close', code => {
             if (code === 0 && url.trim()) {
                 const finalUrl = url.trim().split('\n')[0];
-                console.log(`✅ Link tìm được: ${finalUrl}`);
+                console.log(`✅ Link tìm được: ${finalUrl.substring(0, 30)}...`);
                 resolve(finalUrl);
             } else {
                 console.log("❌ Không tìm thấy.");
@@ -63,13 +65,14 @@ async function getPodcastGiangOi() {
         const feed = await parser.parseURL(RSS_GIANG_OI_RADIO);
         if (!feed.items || !feed.items.length) return null;
 
-        // Chọn ngẫu nhiên 1 tập để nghe
+        // Chọn ngẫu nhiên 1 tập để nghe thay đổi không khí
         const randomItem = feed.items[Math.floor(Math.random() * feed.items.length)];
         console.log(`🎯 Chọn tập: ${randomItem.title}`);
         
+        // SoundCloud RSS luôn có link file xịn trong enclosure
         return randomItem.enclosure ? randomItem.enclosure.url : null;
     } catch (e) {
-        console.error("Lỗi RSS:", e.message);
+        console.error("❌ Lỗi RSS:", e.message);
         return null;
     }
 }
@@ -81,21 +84,21 @@ async function getAudioUrl(query) {
     const lowerQ = query.toLowerCase();
 
     // A. NẾU LÀ "GIANG ƠI" / "PODCAST" / "TÂM SỰ"
-    if (['podcast', 'giang ơi', 'bót cát', 'tâm trạng', 'chữa lành'].some(k => lowerQ.includes(k))) {
+    if (['podcast', 'giang ơi', 'bót cát', 'tâm trạng', 'chữa lành', 'radio'].some(k => lowerQ.includes(k))) {
         
         // Bước 1: Thử lấy từ RSS chính chủ (Ngon nhất)
         const url = await getPodcastGiangOi();
         if (url) return url;
 
-        // Bước 2: Nếu RSS lỗi -> Tìm kiếm bằng từ khóa "Giang Ơi Radio" (CÓ CHỮ RADIO)
-        // Tuyệt đối không tìm mỗi chữ "Giang Ơi" vì sẽ ra nhạc remix
-        console.log("⚠️ RSS lỗi, chuyển sang tìm kiếm khóa 'Giang Ơi Radio'...");
+        // Bước 2: Nếu RSS lỗi -> Tìm kiếm bằng từ khóa "Giang Ơi Radio"
+        // Thêm chữ "Radio" để yt-dlp tìm đúng kênh talkshow, né nhạc remix
+        console.log("⚠️ RSS lỗi -> Tìm kiếm khóa 'Giang Ơi Radio'...");
         return await getLinkFast("Giang Ơi Radio Podcast"); 
     }
 
-    // B. NẾU LÀ TIKTOK
+    // B. NẾU LÀ TIKTOK (Giả lập)
     if (['tiktok', 'tít tót', 'nhạc trend'].some(k => lowerQ.includes(k))) {
-        // Tìm nhạc chill tiktok trên SoundCloud cho nhẹ
+        // Tìm nhạc chill tiktok trên SoundCloud (Vừa nhẹ vừa không bị chặn)
         return await getLinkFast("Nhạc TikTok Ballad Hot Trend Chill"); 
     }
 
@@ -108,7 +111,7 @@ async function getAudioUrl(query) {
 // ============================================================
 app.get('/', (req, res) => res.send(`ESP32 Music Server - ${serverStatus}`));
 
-// API Search
+// API Search (JSON)
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'No query' });
@@ -136,18 +139,21 @@ app.get('/stream', async (req, res) => {
             '-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5',
             '-user_agent "Mozilla/5.0"'
         ])
-        .audioFilters('volume=2.0') 
+        .audioFilters([
+            'volume=2.0',        // Tăng âm lượng
+            'alimiter=limit=0.9' // Chống vỡ tiếng (Thêm cái này cho an toàn)
+        ]) 
         .audioCodec('libmp3lame')
         .audioBitrate(64)       
-        .audioChannels(1) // Mono cho nhẹ, loa của bạn cũng là loa đơn mà
-        .audioFrequency(24000)
+        .audioChannels(1)       // Mono (Bắt buộc)
+        .audioFrequency(44100)  // 44.1kHz (Chuẩn quốc tế cho MP3, ESP32 thích cái này nhất)
         .format('mp3')
         .outputOptions([
             '-vn', '-flush_packets 1', '-preset ultrafast', 
             '-movflags frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
-            if (!err.message.includes('closed')) console.error('Err:', err.message);
+            if (!err.message.includes('closed')) console.error('FFmpeg Err:', err.message);
         })
         .pipe(res, { end: true });
 });
