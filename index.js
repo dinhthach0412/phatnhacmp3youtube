@@ -140,7 +140,7 @@ app.get('/stream', async (req, res) => {
         .audioCodec('libmp3lame')
         .audioBitrate(64)       
         .audioChannels(1) // Mono cho nhẹ, loa của bạn cũng là loa đơn mà
-        .audioFrequency(44100)
+        .audioFrequency(24000)
         .format('mp3')
         .outputOptions([
             '-vn', '-flush_packets 1', '-preset ultrafast', 
