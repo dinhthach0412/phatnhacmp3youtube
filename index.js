@@ -2,157 +2,171 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
-const Parser = require('rss-parser'); // Thư viện đọc RSS
+const Parser = require('rss-parser');
+const axios = require('axios'); // Bắt buộc phải có thư viện này
 const parser = new Parser();
 
 const app = express();
 app.use(cors());
 
-// --- CẤU HÌNH ---
-// Link RSS của Giang Ơi (Lấy từ SoundCloud)
+const PORT = process.env.PORT || 3000;
+
+// --- NGUỒN DỮ LIỆU ---
+// 1. Podcast Giang Ơi (SoundCloud - Ổn định)
 const RSS_GIANG_OI = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
+
+// 2. Kênh TikTok @ballad.bmz (Thông qua ProxiTok RSS - Có thể chập chờn tùy server)
+// Nếu link này chết, bạn có thể tìm "TikTok RSS Generator" để thay link khác
+const RSS_TIKTOK_BALLAD = 'https://proxitok.pabloferreiro.es/@ballad.bmz/rss';
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Booting...";
-
-// Update yt-dlp (Tự động cập nhật công cụ tải khi khởi động)
+// Update yt-dlp 
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
-updateProcess.on('close', () => { serverStatus = "Online (Stable Core)"; });
+updateProcess.on('close', () => { serverStatus = "Online (Ballad Mode Ready)"; });
 
-// --- HÀM 1: LẤY PODCAST NGẪU NHIÊN (Logic mới) ---
-async function getRandomPodcastUrl() {
+// ============================================================
+// 1. TOOL: COBALT (Cứu tinh tải link TikTok/Youtube)
+// ============================================================
+async function getLinkViaCobalt(url) {
     try {
-        console.log("🎙 Server: Phát hiện yêu cầu Podcast -> Đang lấy Giang Ơi Radio...");
-        const feed = await parser.parseURL(RSS_GIANG_OI);
-        
-        if (!feed.items || feed.items.length === 0) return null;
+        console.log(`🌐 Cobalt: Đang xử lý link -> ${url}`);
+        // Sử dụng instance này hoặc tìm instance khác nếu quá tải (https://instances.cobalt.tools)
+        const response = await axios.post('https://api.cobalt.tools/api/json', {
+            url: url,
+            aFormat: 'mp3',
+            isAudioOnly: true,
+            filenamePattern: 'nerdy'
+        }, { headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' } });
 
-        // Chọn ngẫu nhiên 1 tập trong danh sách
-        const randomItem = feed.items[Math.floor(Math.random() * feed.items.length)];
-        
-        console.log(`✅ Server: Đã chọn tập: "${randomItem.title}"`);
-        
-        // Lấy link file mp3 trực tiếp
-        return randomItem.enclosure ? randomItem.enclosure.url : randomItem.link;
-    } catch (e) {
-        console.error("❌ Lỗi lấy RSS:", e.message);
+        if (response.data && response.data.url) {
+            console.log(`✅ Cobalt Success`);
+            return response.data.url;
+        }
+        return null;
+    } catch (error) {
+        console.error("❌ Cobalt Error:", error.message);
         return null;
     }
 }
 
-// --- HÀM 2: TÌM KIẾM THÔNG MINH (Smart Search) ---
+// ============================================================
+// 2. TOOL: LẤY LINK NGẪU NHIÊN TỪ RSS (Hỗ trợ cả SC & TikTok)
+// ============================================================
+async function getRandomFromRSS(rssUrl, sourceName) {
+    try {
+        console.log(`🎙 Đang đọc RSS: ${sourceName}...`);
+        // Timeout 5s để tránh treo server nếu ProxiTok bị lag
+        const feed = await parser.parseURL(rssUrl);
+        
+        if (!feed.items || !feed.items.length) return null;
+
+        // Chọn ngẫu nhiên
+        const randomItem = feed.items[Math.floor(Math.random() * feed.items.length)];
+        console.log(`✅ Đã chọn bài: ${randomItem.title}`);
+
+        // Xử lý kết quả trả về
+        // Nếu là SoundCloud (Giang Ơi) -> Lấy enclosure
+        if (sourceName === 'SoundCloud') {
+            return randomItem.enclosure ? randomItem.enclosure.url : randomItem.link;
+        }
+        
+        // Nếu là TikTok (@ballad.bmz) -> Lấy Link gốc -> Ném sang Cobalt
+        if (sourceName === 'TikTok') {
+            const tiktokLink = randomItem.link; // Link video tiktok
+            // Gọi Cobalt để lấy MP3 từ link video này
+            return await getLinkViaCobalt(tiktokLink);
+        }
+
+        return randomItem.link;
+    } catch (e) {
+        console.error(`❌ Lỗi RSS ${sourceName}:`, e.message);
+        return null;
+    }
+}
+
+// ============================================================
+// 3. LOGIC ĐIỀU PHỐI (MAIN)
+// ============================================================
 async function getAudioUrl(query) {
-    // 1. CHẶN TỪ KHÓA PODCAST TRƯỚC
     const lowerQ = query.toLowerCase();
-    const podcastKeywords = ['podcast', 'giang ơi', 'tâm sự', 'radio', 'chữa lành', 'tình yêu', 'buồn quá'];
-    
-    // Nếu câu nói có chứa từ khóa trên -> Gọi hàm lấy Podcast ngay
-    if (podcastKeywords.some(keyword => lowerQ.includes(keyword))) {
-        const podcastUrl = await getRandomPodcastUrl();
-        if (podcastUrl) return podcastUrl;
-        // Nếu lỗi RSS thì mới chạy xuống tìm kiếm thường
+
+    // A. NẾU LÀ LINK TRỰC TIẾP (Paste link) -> Cobalt
+    if (lowerQ.includes('http')) {
+        return await getLinkViaCobalt(query);
     }
 
-    // 2. NẾU KHÔNG PHẢI PODCAST -> TÌM NHẠC THƯỜNG (Logic cũ)
-    return new Promise((resolve, reject) => {
-        // Lọc từ khóa rác
-        let cleanQuery = lowerQ.replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
-        let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
+    // B. NẾU MUỐN NGHE KÊNH @BALLAD.BMZ (Mới)
+    // Từ khóa: "ballad", "nhạc tâm trạng", "tiktok chill"
+    const balladKeywords = ['ballad', 'tâm trạng', 'nhạc buồn', 'tiktok chill'];
+    if (balladKeywords.some(k => lowerQ.includes(k))) {
+        // Thử lấy từ RSS TikTok trước
+        const tiktokUrl = await getRandomFromRSS(RSS_TIKTOK_BALLAD, 'TikTok');
+        if (tiktokUrl) return tiktokUrl;
         
-        console.log(`🔍 Server: Tìm nhạc thường: "${finalQuery}"`);
-        
-        const args = [
-            `scsearch1:${finalQuery}`, // Tìm 1 bài
-            '-f', 'bestaudio/best',    
-            '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
-        ];
-
-        const yt = spawn('/usr/local/bin/yt-dlp', args);
+        // Nếu RSS TikTok lỗi (do server chặn), TỰ ĐỘNG chuyển sang tìm trên YouTube
+        // Tìm "Ballad BMZ compilation" trên Youtube -> Bao ổn định
+        console.log("⚠️ RSS TikTok lỗi -> Chuyển sang tìm YouTube Compilation cho chắc ăn.");
+        const yt = spawn('/usr/local/bin/yt-dlp', [
+            `ytsearch1:ballad bmz tiktok compilation audio`, 
+            '-f', 'bestaudio/best', '--get-url', '--no-playlist', '--no-warnings'
+        ]);
         let url = '';
-
-        yt.stdout.on('data', d => url += d.toString());
-        
-        yt.on('close', code => {
-            if (code === 0 && url.trim()) {
-                const finalUrl = url.trim().split('\n')[0];
-                console.log(`✅ Link nhạc: ${finalUrl}`);
-                resolve(finalUrl);
-            } else {
-                console.log("❌ Không tìm thấy bài nào.");
-                resolve(null);
-            }
+        return new Promise((resolve) => {
+            yt.stdout.on('data', d => url += d);
+            yt.on('close', () => resolve(url.trim() ? url.trim().split('\n')[0] : null));
         });
+    }
+
+    // C. NẾU LÀ PODCAST GIANG ƠI
+    if (['podcast', 'giang', 'bót', 'radio'].some(k => lowerQ.includes(k))) {
+        const podcastUrl = await getRandomFromRSS(RSS_GIANG_OI, 'SoundCloud');
+        if (podcastUrl) return podcastUrl;
+    }
+
+    // D. CÒN LẠI -> TÌM NHẠC SOUNDCLOUD (Fallback)
+    console.log(`🔍 Fallback Search SC: ${query}`);
+    const sc = spawn('/usr/local/bin/yt-dlp', [
+        `scsearch1:${query}`, 
+        '-f', 'bestaudio/best', '--get-url', '--no-playlist', '--no-warnings'
+    ]);
+    let scUrl = '';
+    return new Promise((resolve) => {
+        sc.stdout.on('data', d => scUrl += d);
+        sc.on('close', () => resolve(scUrl.trim() ? scUrl.trim().split('\n')[0] : null));
     });
 }
 
-app.get('/', (req, res) => res.send(`Server Music ESP32 - ${serverStatus}`));
-
+// --- CÁC API KHÁC GIỮ NGUYÊN ---
 app.get('/search', async (req, res) => {
     const q = req.query.q;
-    if (!q) return res.status(400).json({ error: 'No query' });
-    
-    // Server trả về link stream của chính nó
     const myServerUrl = `https://${req.get('host')}/stream?q=${encodeURIComponent(q)}`;
-    
-    // Trả JSON để ESP32 biết đường gọi
-    res.json({ success: true, title: q, artist: "Smart Audio", url: myServerUrl });
+    res.json({ success: true, title: "Smart Stream", url: myServerUrl });
 });
 
-// --- API STREAM (FFMPEG MONO - Fix lỗi tắt nguồn) ---
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
 
-    // Gọi hàm thông minh: Tự quyết định là Nhạc hay Podcast
     const audioUrl = await getAudioUrl(q);
-    
     if (!audioUrl) return res.status(404).send("Not found");
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Streaming về ESP32...");
+    console.log("🚀 Streaming Mono 64k...");
 
     ffmpeg(audioUrl)
-        .inputOptions([
-            '-reconnect 1', 
-            '-reconnect_streamed 1', 
-            '-reconnect_delay_max 5',
-            '-probesize 128000',
-            '-user_agent "Mozilla/5.0"'
-        ])
-        
-        // --- CHỈNH VOLUME & KÊNH ---
-        .audioFilters([
-            'volume=2.0',         // Tăng âm lượng
-            'alimiter=limit=0.95' // Chống vỡ tiếng
-        ]) 
-        
+        .inputOptions(['-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5', '-user_agent "Mozilla/5.0"'])
+        .audioFilters(['volume=2.0', 'alimiter=limit=0.95'])
         .audioCodec('libmp3lame')
         .audioBitrate(64)
-        
-        // *** QUAN TRỌNG: CHUYỂN VỀ MONO (1 KÊNH) ***
-        // Code cũ của bạn là .audioChannels(2) -> Gây crash ESP32
-        // Code mới là .audioChannels(1) -> Nhẹ, mượt, không lỗi
-        .audioChannels(1) 
-        
+        .audioChannels(1) // MONO
         .audioFrequency(44100)
         .format('mp3')
-        
-        .outputOptions([
-            '-vn', '-map_metadata', '-1',
-            '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
-            '-flush_packets', '1', 
-            '-bufsize', '64k',     
-            '-minrate', '64k', '-maxrate', '64k', 
-            '-preset', 'ultrafast',
-            '-movflags', 'frag_keyframe+empty_moov'
-        ])
-        .on('error', (err) => {
-            if (!err.message.includes('Output stream closed')) console.error('Err:', err.message);
-        })
+        .outputOptions(['-vn', '-flush_packets 1', '-preset ultrafast', '-movflags frag_keyframe+empty_moov'])
+        .on('error', () => {})
         .pipe(res, { end: true });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server chạy port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
