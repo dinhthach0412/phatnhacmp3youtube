@@ -3,7 +3,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const Parser = require('rss-parser');
-const axios = require('axios'); // Bắt buộc phải có trong package.json
+const axios = require('axios');
 const parser = new Parser();
 
 const app = express();
@@ -12,45 +12,36 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 // --- CẤU HÌNH NGUỒN ---
-// 1. Kênh TikTok @ballad.bmz (Dùng RSS của ProxiTok)
 const RSS_TIKTOK_BALLAD = 'https://proxitok.pabloferreiro.es/@ballad.bmz/rss';
-
-// 2. Podcast Giang Ơi (SoundCloud)
 const RSS_GIANG_OI = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
 
 // --- TRẠNG THÁI SERVER ---
 let serverStatus = "Booting...";
 
-// Update yt-dlp khi khởi động (để tính năng tìm kiếm SoundCloud luôn mượt)
 const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
 updateProcess.on('close', () => { 
-    serverStatus = "Online (Ready)"; 
+    serverStatus = "Online (Fixed Podcast)"; 
     console.log("✅ yt-dlp updated.");
 });
 
 // ============================================================
-// 1. TOOL: COBALT (Tải link TikTok/Youtube không bị chặn)
+// 1. TOOL: COBALT
 // ============================================================
 async function getLinkViaCobalt(url) {
     try {
-        // [QUAN TRỌNG] Chuyển link ProxiTok (RSS) thành link TikTok gốc
-        // RSS trả về: https://proxitok.../status/7438...
-        // TikTok cần: https://www.tiktok.com/@user/video/7438...
         let realUrl = url;
         if (url.includes('proxitok')) {
             const videoId = url.split('/status/')[1]?.split('?')[0];
             if (videoId) {
-                // Tên user không quan trọng, quan trọng là ID video
                 realUrl = `https://www.tiktok.com/@ballad.bmz/video/${videoId}`;
             }
         }
 
         console.log(`🌐 Cobalt Processing: ${realUrl}`);
         
-        // Gọi API Cobalt (Instance Public ổn định)
         const response = await axios.post('https://api.cobalt.tools/api/json', {
             url: realUrl,
-            aFormat: 'mp3',       // Chỉ lấy Audio
+            aFormat: 'mp3',
             isAudioOnly: true,
             filenamePattern: 'nerdy'
         }, { 
@@ -59,7 +50,7 @@ async function getLinkViaCobalt(url) {
                 'Content-Type': 'application/json',
                 'User-Agent': 'Mozilla/5.0' 
             },
-            timeout: 15000 // Chờ tối đa 15s
+            timeout: 15000 
         });
 
         if (response.data && response.data.url) {
@@ -74,11 +65,10 @@ async function getLinkViaCobalt(url) {
 }
 
 // ============================================================
-// 2. TOOL: TÌM KIẾM SOUNDCLOUD (Phương án dự phòng)
+// 2. TOOL: TÌM KIẾM SOUNDCLOUD (ĐÃ SỬA TỪ KHÓA)
 // ============================================================
 function searchSoundCloud(query) {
     return new Promise((resolve) => {
-        // Lọc bớt từ khóa rác để tìm chính xác hơn
         let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của|tiktok/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
@@ -109,7 +99,7 @@ function searchSoundCloud(query) {
 }
 
 // ============================================================
-// 3. TOOL: RSS READER (Lấy ngẫu nhiên từ danh sách)
+// 3. TOOL: RSS READER
 // ============================================================
 async function getRandomFromRSS(rssUrl, type) {
     try {
@@ -117,15 +107,12 @@ async function getRandomFromRSS(rssUrl, type) {
         const feed = await parser.parseURL(rssUrl);
         if (!feed.items || !feed.items.length) return null;
 
-        // Chọn ngẫu nhiên 1 bài trong danh sách RSS (thường là 20 bài mới nhất)
         const randomItem = feed.items[Math.floor(Math.random() * feed.items.length)];
         console.log(`🎯 RSS Picked: ${randomItem.title}`);
 
         if (type === 'tiktok') {
-            // Nếu là TikTok -> Phải qua bước Cobalt xử lý link
             return await getLinkViaCobalt(randomItem.link);
         } else {
-            // Nếu là SoundCloud -> Lấy link trực tiếp
             return randomItem.enclosure ? randomItem.enclosure.url : null;
         }
     } catch (e) {
@@ -140,44 +127,43 @@ async function getRandomFromRSS(rssUrl, type) {
 async function getAudioUrl(query) {
     const lowerQ = query.toLowerCase();
 
-    // 1. LINK TRỰC TIẾP (Nếu người dùng paste link)
+    // 1. LINK TRỰC TIẾP
     if (lowerQ.includes('http')) {
         return await getLinkViaCobalt(query) || await searchSoundCloud(query);
     }
 
-    // 2. PODCAST GIANG ƠI
-    if (['podcast', 'giang ơi', 'bót cát', 'radio'].some(k => lowerQ.includes(k))) {
+    // 2. PODCAST GIANG ƠI (ĐÃ FIX CHẶT CHẼ)
+    // Từ khóa bên ESP32 gửi lên là "Radio Podcast Healing" -> dính chữ "radio"
+    if (['podcast', 'giang ơi', 'bót cát', 'radio', 'chữa lành'].some(k => lowerQ.includes(k))) {
+        // Ưu tiên 1: Lấy từ RSS (Chất lượng cao nhất)
         const url = await getRandomFromRSS(RSS_GIANG_OI, 'sc');
         if (url) return url;
-        return await searchSoundCloud("Giang Ơi Podcast"); // Dự phòng
+
+        // Ưu tiên 2 (Nếu RSS lỗi): Tìm chính xác "Giang Ơi Radio"
+        // KHÔNG dùng "Giang Ơi" trống không nữa -> Tránh Remix
+        console.log("⚠️ RSS Lỗi -> Tìm chính xác 'Giang Ơi Radio'...");
+        return await searchSoundCloud("Giang Ơi Radio"); 
     }
 
-    // 3. TIKTOK BALLAD (@ballad.bmz)
+    // 3. TIKTOK BALLAD
     const tiktokKeywords = ['tiktok', 'tít tót', 'tíc tốc', 'tâm trạng', 'ballad', 'buồn', 'nhạc tiktok'];
     if (tiktokKeywords.some(k => lowerQ.includes(k))) {
-        // Thử lấy TikTok thật
         const url = await getRandomFromRSS(RSS_TIKTOK_BALLAD, 'tiktok');
+        if (url) return url;
         
-        if (url) {
-            return url;
-        } else {
-            // NẾU TIKTOK LỖI -> TỰ ĐỘNG TÌM TRÊN SOUNDCLOUD
-            // Để đảm bảo không bao giờ bị im lặng
-            console.log("⚠️ TikTok RSS Lỗi -> Chuyển sang tìm trên SoundCloud...");
-            return await searchSoundCloud("Nhạc TikTok Ballad Buồn Chill");
-        }
+        console.log("⚠️ TikTok RSS Lỗi -> Tìm SoundCloud...");
+        return await searchSoundCloud("Nhạc TikTok Ballad Buồn Chill");
     }
 
-    // 4. MẶC ĐỊNH: TÌM NHẠC THƯỜNG
+    // 4. MẶC ĐỊNH
     return await searchSoundCloud(query);
 }
 
 // ============================================================
 // ROUTES & SERVER
 // ============================================================
-app.get('/', (req, res) => res.send(`Xiaozhi Music Server - ${serverStatus}`));
+app.get('/', (req, res) => res.send(`Music Server Fixed - ${serverStatus}`));
 
-// API Search (Trả về JSON)
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'Missing query' });
@@ -185,7 +171,6 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "Smart Audio", url: streamUrl });
 });
 
-// API Stream (Xử lý Audio cho ESP32)
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -198,20 +183,16 @@ app.get('/stream', async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    // STREAM VÀ TRANSCODE
     ffmpeg(audioUrl)
         .inputOptions([
             '-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5',
             '-user_agent "Mozilla/5.0"'
         ])
-        .audioFilters([
-            'volume=2.0',         // Tăng âm lượng
-            'alimiter=limit=0.9'  // Chống vỡ tiếng/rè
-        ])
+        .audioFilters(['volume=2.0', 'alimiter=limit=0.9'])
         .audioCodec('libmp3lame')
-        .audioBitrate(64)       // 64kbps (Nhẹ)
-        .audioChannels(1)       // Mono (Bắt buộc cho ESP32 để không crash)
-        .audioFrequency(44100)  // 44.1kHz (Chuẩn)
+        .audioBitrate(64)
+        .audioChannels(1)
+        .audioFrequency(44100)
         .format('mp3')
         .outputOptions([
             '-vn', '-flush_packets 1', '-preset ultrafast', 
