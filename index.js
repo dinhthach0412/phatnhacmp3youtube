@@ -84,7 +84,7 @@ app.get('/stream', async (req, res) => {
         
         .audioCodec('libmp3lame')
         .audioBitrate(64)       
-        .audioChannels(2)
+        .audioChannels(1)
         .audioFrequency(44100) // Chuẩn 44.1kHz (ESP32 code mới đã cân tốt)
         .format('mp3')
         
