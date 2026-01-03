@@ -1,15 +1,18 @@
 {
-  "name": "xiaozhi-server",
+  "name": "esp32-music-server",
   "version": "1.0.0",
+  "description": "Backend Server for Xiaozhi ESP32 Audio Streaming",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.0",
     "cors": "^2.8.5",
-    "express": "^4.18.2",
+    "express": "^4.19.2",
     "fluent-ffmpeg": "^2.1.2",
     "rss-parser": "^3.13.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
