@@ -145,7 +145,7 @@ app.get('/stream', async (req, res) => {
         .inputOptions([
             // [QUAN TRỌNG] '-re': Đọc input theo tốc độ thực. 
             // Giúp Server không gửi dữ liệu ồ ạt làm sập ESP32.
-            '-re', 
+        
             '-reconnect 1', 
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
