@@ -1,166 +1,108 @@
-/**
- * Smart Audio Server - STABLE CONNECTION
- * Fix: Keep-Alive for ESP32 multitasking
- */
-
 const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
-const Parser = require('rss-parser');
 
 const app = express();
-const parser = new Parser();
 app.use(cors());
 
-// ======================
-// CONFIG
-// ======================
-const YTDLP_PATH = '/usr/local/bin/yt-dlp';
-const PORT = process.env.PORT || 3000;
-const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
+// --- TRẠNG THÁI SERVER ---
+let serverStatus = "Booting...";
 
-let serverStatus = 'Booting...';
+// Update yt-dlp (Tự động cập nhật công cụ tải khi khởi động)
+const updateProcess = spawn('/usr/local/bin/yt-dlp', ['-U']);
+updateProcess.on('close', () => { serverStatus = "Online (Stable Core)"; });
 
-spawn(YTDLP_PATH, ['-U']).on('close', () => {
-    serverStatus = 'Online (Stable Mode)';
-    console.log('✅ yt-dlp updated');
-});
+// --- HÀM LẤY LINK (SCSEARCH1 - TÌM NHANH) ---
+function getAudioUrl(query) {
+    return new Promise((resolve, reject) => {
+        // Lọc từ khóa rác
+        let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
+        let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
+        
+        console.log(`🔍 Tìm: "${finalQuery}"`);
+        
+        const args = [
+            `scsearch1:${finalQuery}`, // Tìm 1 bài (Ưu tiên tốc độ)
+            '-f', 'bestaudio/best',    // Lấy link xịn nhất (Kể cả m3u8)
+            '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
+        ];
 
-app.get('/', (req, res) => res.send(`Smart Audio Server – ${serverStatus}`));
+        const yt = spawn('/usr/local/bin/yt-dlp', args);
+        let url = '';
 
-function cleanTitle(str) {
-    if (!str) return 'Unknown Track';
-    let clean = str.replace(/(\r\n|\n|\r)/gm, " ").trim();
-    if (clean.length > 50) clean = clean.substring(0, 50) + '...';
-    return clean;
+        yt.stdout.on('data', d => url += d.toString());
+        
+        yt.on('close', code => {
+            if (code === 0 && url.trim()) {
+                const finalUrl = url.trim().split('\n')[0];
+                console.log(`✅ Link: ${finalUrl}`);
+                resolve(finalUrl);
+            } else {
+                console.log("❌ Không tìm thấy bài nào.");
+                resolve(null);
+            }
+        });
+    });
 }
 
-// ======================
-// 1. SEARCH
-// ======================
+app.get('/', (req, res) => res.send(`Server Music ESP32 - ${serverStatus}`));
+
 app.get('/search', async (req, res) => {
-    const q = req.query.q || '';
+    const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'No query' });
-
-    console.log(`🔍 Searching: ${q}`);
-    const keyword = q.toLowerCase();
-
-    // --- CASE 1: RSS ---
-    if (keyword.includes('giang oi') || keyword.includes('giangoi') || keyword.includes('podcast')) {
-        try {
-            const feed = await parser.parseURL(GIANGOI_RSS_URL);
-            const latestItem = feed.items[0]; 
-            if (latestItem) {
-                const safeTitle = cleanTitle(latestItem.title);
-                const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`;
-                console.log(`✅ Found RSS: ${safeTitle}`);
-                console.log(`👉 CLICK TEST: ${streamUrl}`);
-                return res.json({
-                    success: true,
-                    title: safeTitle,
-                    artist: 'Giang Oi Radio',
-                    url: streamUrl
-                });
-            }
-        } catch (e) {
-            console.error('RSS Fail');
-        }
-    }
-
-    // --- CASE 2: SOUNDCLOUD ---
-    const searchProcess = spawn(YTDLP_PATH, [
-        `scsearch1:${q}`, 
-        '--print', '%(title)s|%(webpage_url)s',
-        '--no-playlist',
-        '--no-warnings',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    ]);
-
-    let outputData = '';
-    searchProcess.stdout.on('data', d => outputData += d.toString());
-
-    searchProcess.on('close', (code) => {
-        if (code !== 0 || !outputData.trim()) {
-            return res.json({ success: true, title: 'Not Found', artist: 'System', url: '' });
-        }
-        const parts = outputData.trim().split('|');
-        const safeTitle = cleanTitle(parts[0]);
-        const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(parts[1])}`;
-        
-        console.log(`✅ Found SC: ${safeTitle}`);
-        console.log(`👉 CLICK TEST: ${streamUrl}`);
-
-        res.json({
-            success: true,
-            title: safeTitle,
-            artist: 'SoundCloud',
-            url: streamUrl
-        });
-    });
+    const myServerUrl = `https://${req.get('host')}/stream?q=${encodeURIComponent(q)}`;
+    res.json({ success: true, title: q, artist: "SoundCloud", url: myServerUrl });
 });
 
-// ======================
-// 2. STREAM (CỐ ĐỊNH KẾT NỐI)
-// ======================
-app.get('/stream', (req, res) => {
-    const inputUrl = req.query.url;
-    if (!inputUrl) return res.status(400).send('No URL');
+// --- API STREAM (FFMPEG ĐẢM NHIỆM TẤT CẢ) ---
+app.get('/stream', async (req, res) => {
+    const q = req.query.q;
+    if (!q) return res.status(400).send("No query");
 
-    console.log(`🎧 STREAMING...`);
+    const audioUrl = await getAudioUrl(q);
+    if (!audioUrl) return res.status(404).send("Not found");
 
-    // Tinh chỉnh Header để Render không ngắt kết nối sớm
-    res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
-        'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=60', // Giữ kết nối 60s chờ ESP32
-        'Cache-Control': 'no-cache',
-        'icy-name': 'Smart Audio',
-        'icy-br': '64'
-    });
-    
-    // Gửi header ngay lập tức để ESP32 biết kết nối đã thành công
-    res.flushHeaders(); 
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Transfer-Encoding', 'chunked');
 
-    const ytdlp = spawn(YTDLP_PATH, [
-        inputUrl,
-        '-f', 'bestaudio', 
-        '-o', '-',
-        '--no-playlist',
-        '--no-warnings',
-        '--force-ipv4',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    ]);
+    console.log("🚀 Streaming...");
 
-    const ff = ffmpeg(ytdlp.stdout)
+    // 
+    // FFmpeg tự xử lý Input -> Filter -> Encode -> Pipe ra Response
+    ffmpeg(audioUrl)
         .inputOptions([
-            '-thread_queue_size', '4096' 
-        ]) 
+            '-reconnect 1', 
+            '-reconnect_streamed 1', 
+            '-reconnect_delay_max 5',
+            '-probesize 128000',     // Thăm dò nhanh
+            '-user_agent "Mozilla/5.0"'
+        ])
+        
+        // --- CHỈNH VOLUME 2.0 (Vừa đủ nghe, không rè) ---
+        .audioFilters(['volume=2.0']) 
+        
         .audioCodec('libmp3lame')
-        .audioBitrate('64k')
+        .audioBitrate(64)       
         .audioChannels(1)
-        .audioFrequency(44100)
+        .audioFrequency(44100) // Chuẩn 44.1kHz (ESP32 code mới đã cân tốt)
         .format('mp3')
+        
         .outputOptions([
-            '-vn',
-            '-write_xing 0', 
-            '-flush_packets 1',
-            '-bufsize', '64k' 
+            '-vn', '-map_metadata', '-1',
+            '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
+            '-flush_packets', '1',  // Đẩy gói tin đi ngay (Giảm độ trễ)
+            '-bufsize', '64k',      // Buffer vừa miếng
+            '-minrate', '64k', '-maxrate', '64k', 
+            '-preset', 'ultrafast',
+            '-movflags', 'frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
-            // Không log lỗi pipe vớ vẩn
-            if (!err.message.includes('EPIPE')) console.error('FFmpeg Error:', err.message);
-        });
-
-    ff.pipe(res);
-
-    req.on('close', () => {
-        console.log('🔌 Disconnected');
-        setTimeout(() => {
-            ytdlp.kill('SIGKILL');
-            ff.kill('SIGKILL');
-        }, 1000);
-    });
+            // Bỏ qua lỗi client ngắt kết nối
+            if (!err.message.includes('Output stream closed')) console.error('Err:', err.message);
+        })
+        .pipe(res, { end: true });
 });
 
-app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server chạy port ${PORT}`));
