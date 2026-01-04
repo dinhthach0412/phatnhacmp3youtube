@@ -1,7 +1,6 @@
 /**
- * Smart Audio Server - SOUNDCLOUD EDITION
- * Source: SoundCloud (Search) + SoundCloud (RSS)
- * No YouTube Search involved.
+ * Smart Audio Server - DEBUG EDITION
+ * Added: Clickable Stream Link in Logs
  */
 
 const express = require('express');
@@ -19,22 +18,26 @@ app.use(cors());
 // ======================
 const YTDLP_PATH = '/usr/local/bin/yt-dlp';
 const PORT = process.env.PORT || 3000;
-
-// Link RSS chuẩn của Giang Ơi Radio
 const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
 
 let serverStatus = 'Booting...';
 
-// Update yt-dlp khi khởi động (quan trọng để fix lỗi SoundCloud API thay đổi)
 spawn(YTDLP_PATH, ['-U']).on('close', () => {
-    serverStatus = 'Online (SoundCloud Mode)';
+    serverStatus = 'Online (Debug Mode)';
     console.log('✅ yt-dlp updated');
 });
 
 app.get('/', (req, res) => res.send(`Smart Audio Server – ${serverStatus}`));
 
+function cleanTitle(str) {
+    if (!str) return 'Unknown Track';
+    let clean = str.replace(/(\r\n|\n|\r)/gm, " ").trim();
+    if (clean.length > 50) clean = clean.substring(0, 50) + '...';
+    return clean;
+}
+
 // ======================
-// 1. SEARCH: TẤT CẢ ĐỀU LÀ SOUNDCLOUD
+// 1. SEARCH (CÓ LOG LINK)
 // ======================
 app.get('/search', async (req, res) => {
     const q = req.query.q || '';
@@ -43,20 +46,25 @@ app.get('/search', async (req, res) => {
     console.log(`🔍 Searching: ${q}`);
     const keyword = q.toLowerCase();
 
-    // --- CASE 1: GIANG OI PODCAST (Ưu tiên dùng RSS lấy tập mới nhất) ---
+    // --- CASE 1: RSS (GIANG OI) ---
     if (keyword.includes('giang oi') || keyword.includes('giangoi') || keyword.includes('podcast')) {
-        console.log('🎙️ Mode: Giang Oi (via RSS)');
         try {
             const feed = await parser.parseURL(GIANGOI_RSS_URL);
             const latestItem = feed.items[0]; 
             
             if (latestItem) {
-                console.log(`✅ Found RSS: ${latestItem.title}`);
+                const safeTitle = cleanTitle(latestItem.title);
+                // Tạo link stream
+                const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`;
+                
+                console.log(`✅ Found RSS: ${safeTitle}`);
+                console.log(`👉 CLICK TEST: ${streamUrl}`); // <--- Dòng bạn cần đây
+
                 return res.json({
                     success: true,
-                    title: latestItem.title,
-                    artist: 'Giang Ơi Radio',
-                    url: `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`
+                    title: safeTitle,
+                    artist: 'Giang Oi Radio',
+                    url: streamUrl
                 });
             }
         } catch (e) {
@@ -64,15 +72,13 @@ app.get('/search', async (req, res) => {
         }
     }
 
-    // --- CASE 2: TÌM NHẠC BẤT KỲ (SOUNDCLOUD SEARCH) ---
-    // Thay đổi quan trọng: scsearch1 (SoundCloud) thay vì ytsearch1 (Youtube)
-    console.log('☁️ Mode: SoundCloud Search');
-    
+    // --- CASE 2: SOUNDCLOUD SEARCH ---
     const searchProcess = spawn(YTDLP_PATH, [
-        `scsearch1:${q}`,  // <-- scsearch = SoundCloud Search
+        `scsearch1:${q}`, 
         '--print', '%(title)s|%(webpage_url)s',
         '--no-playlist',
-        '--no-warnings'
+        '--no-warnings',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     ]);
 
     let outputData = '';
@@ -91,26 +97,33 @@ app.get('/search', async (req, res) => {
             });
         }
 
-        const [realTitle, realUrl] = outputData.trim().split('|');
-        console.log(`✅ Found SC: ${realTitle}`);
+        const parts = outputData.trim().split('|');
+        const safeTitle = cleanTitle(parts[0]);
+        const realUrl = parts[1];
+        
+        // Tạo link stream
+        const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(realUrl)}`;
+
+        console.log(`✅ Found SC: ${safeTitle}`);
+        console.log(`👉 CLICK TEST: ${streamUrl}`); // <--- Dòng bạn cần đây
 
         res.json({
             success: true,
-            title: realTitle,
+            title: safeTitle,
             artist: 'SoundCloud',
-            url: `https://${req.get('host')}/stream?url=${encodeURIComponent(realUrl)}`
+            url: streamUrl
         });
     });
 });
 
 // ======================
-// 2. STREAM: TRANSCODE CHO ESP32
+// 2. STREAM
 // ======================
 app.get('/stream', (req, res) => {
     const inputUrl = req.query.url;
     if (!inputUrl) return res.status(400).send('No URL');
 
-    console.log(`🎧 STREAMING...`);
+    console.log(`🎧 STREAMING...`); // Khi bạn click link test, dòng này sẽ hiện
 
     res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
@@ -120,32 +133,34 @@ app.get('/stream', (req, res) => {
         'icy-br': '64'
     });
 
-    // yt-dlp tải link (Hỗ trợ cực tốt SoundCloud)
     const ytdlp = spawn(YTDLP_PATH, [
         inputUrl,
-        '-f', 'bestaudio', // SoundCloud thường là mp3/aac
+        '-f', 'bestaudio', 
         '-o', '-',
         '--no-playlist',
         '--no-warnings',
-        '--force-ipv4'
+        '--force-ipv4',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     ]);
 
-    // Transcode về chuẩn ESP32 (MP3 64k Mono)
     const ff = ffmpeg(ytdlp.stdout)
-        .inputOptions(['-re']) 
+        .inputOptions(['-re', '-thread_queue_size', '4096']) 
         .audioCodec('libmp3lame')
         .audioBitrate('64k')
         .audioChannels(1)
         .audioFrequency(44100)
         .format('mp3')
-        .outputOptions(['-vn', '-write_xing 0', '-flush_packets 1'])
+        .outputOptions(['-vn', '-write_xing 0', '-flush_packets 1', '-bufsize', '64k'])
         .on('error', (err) => {
-            if (!err.message.includes('EPIPE')) console.error('FFmpeg Error:', err.message);
+            if (!err.message.includes('EPIPE') && !err.message.includes('ECONNRESET')) {
+                console.error('FFmpeg Error:', err.message);
+            }
         });
 
     ff.pipe(res);
 
     req.on('close', () => {
+        // Khi bạn tắt tab trình duyệt test hoặc ESP32 ngắt, nó sẽ báo disconnected
         console.log('🔌 Disconnected');
         setTimeout(() => {
             ytdlp.kill('SIGKILL');
