@@ -1,6 +1,6 @@
 /**
- * Smart Audio Server - DEBUG EDITION
- * Added: Clickable Stream Link in Logs
+ * Smart Audio Server - TURBO MODE
+ * Removed '-re' to fill ESP32 buffer instantly
  */
 
 const express = require('express');
@@ -23,7 +23,7 @@ const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253
 let serverStatus = 'Booting...';
 
 spawn(YTDLP_PATH, ['-U']).on('close', () => {
-    serverStatus = 'Online (Debug Mode)';
+    serverStatus = 'Online (Turbo Mode)';
     console.log('✅ yt-dlp updated');
 });
 
@@ -37,7 +37,7 @@ function cleanTitle(str) {
 }
 
 // ======================
-// 1. SEARCH (CÓ LOG LINK)
+// 1. SEARCH
 // ======================
 app.get('/search', async (req, res) => {
     const q = req.query.q || '';
@@ -46,20 +46,16 @@ app.get('/search', async (req, res) => {
     console.log(`🔍 Searching: ${q}`);
     const keyword = q.toLowerCase();
 
-    // --- CASE 1: RSS (GIANG OI) ---
+    // --- CASE 1: RSS ---
     if (keyword.includes('giang oi') || keyword.includes('giangoi') || keyword.includes('podcast')) {
         try {
             const feed = await parser.parseURL(GIANGOI_RSS_URL);
             const latestItem = feed.items[0]; 
-            
             if (latestItem) {
                 const safeTitle = cleanTitle(latestItem.title);
-                // Tạo link stream
                 const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`;
-                
                 console.log(`✅ Found RSS: ${safeTitle}`);
-                console.log(`👉 CLICK TEST: ${streamUrl}`); // <--- Dòng bạn cần đây
-
+                console.log(`👉 CLICK TEST: ${streamUrl}`);
                 return res.json({
                     success: true,
                     title: safeTitle,
@@ -68,11 +64,11 @@ app.get('/search', async (req, res) => {
                 });
             }
         } catch (e) {
-            console.error('RSS Fail, fallback to Search');
+            console.error('RSS Fail');
         }
     }
 
-    // --- CASE 2: SOUNDCLOUD SEARCH ---
+    // --- CASE 2: SOUNDCLOUD ---
     const searchProcess = spawn(YTDLP_PATH, [
         `scsearch1:${q}`, 
         '--print', '%(title)s|%(webpage_url)s',
@@ -82,30 +78,18 @@ app.get('/search', async (req, res) => {
     ]);
 
     let outputData = '';
-
-    searchProcess.stdout.on('data', (data) => {
-        outputData += data.toString();
-    });
+    searchProcess.stdout.on('data', d => outputData += d.toString());
 
     searchProcess.on('close', (code) => {
         if (code !== 0 || !outputData.trim()) {
-            return res.json({
-                success: true,
-                title: 'Not Found', 
-                artist: 'System',
-                url: ''
-            });
+            return res.json({ success: true, title: 'Not Found', artist: 'System', url: '' });
         }
-
         const parts = outputData.trim().split('|');
         const safeTitle = cleanTitle(parts[0]);
-        const realUrl = parts[1];
+        const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(parts[1])}`;
         
-        // Tạo link stream
-        const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(realUrl)}`;
-
         console.log(`✅ Found SC: ${safeTitle}`);
-        console.log(`👉 CLICK TEST: ${streamUrl}`); // <--- Dòng bạn cần đây
+        console.log(`👉 CLICK TEST: ${streamUrl}`);
 
         res.json({
             success: true,
@@ -117,13 +101,13 @@ app.get('/search', async (req, res) => {
 });
 
 // ======================
-// 2. STREAM
+// 2. STREAM (TURBO - NO LAG)
 // ======================
 app.get('/stream', (req, res) => {
     const inputUrl = req.query.url;
     if (!inputUrl) return res.status(400).send('No URL');
 
-    console.log(`🎧 STREAMING...`); // Khi bạn click link test, dòng này sẽ hiện
+    console.log(`🎧 STREAMING...`);
 
     res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
@@ -144,23 +128,28 @@ app.get('/stream', (req, res) => {
     ]);
 
     const ff = ffmpeg(ytdlp.stdout)
-        .inputOptions(['-re', '-thread_queue_size', '4096']) 
+        .inputOptions([
+            // ĐÃ BỎ '-re' Ở ĐÂY ĐỂ TỐC ĐỘ TỐI ĐA
+            '-thread_queue_size', '4096' 
+        ]) 
         .audioCodec('libmp3lame')
         .audioBitrate('64k')
         .audioChannels(1)
         .audioFrequency(44100)
         .format('mp3')
-        .outputOptions(['-vn', '-write_xing 0', '-flush_packets 1', '-bufsize', '64k'])
+        .outputOptions([
+            '-vn',
+            '-write_xing 0', 
+            '-flush_packets 1',
+            '-bufsize', '64k'
+        ])
         .on('error', (err) => {
-            if (!err.message.includes('EPIPE') && !err.message.includes('ECONNRESET')) {
-                console.error('FFmpeg Error:', err.message);
-            }
+            if (!err.message.includes('EPIPE')) console.error('FFmpeg Error:', err.message);
         });
 
     ff.pipe(res);
 
     req.on('close', () => {
-        // Khi bạn tắt tab trình duyệt test hoặc ESP32 ngắt, nó sẽ báo disconnected
         console.log('🔌 Disconnected');
         setTimeout(() => {
             ytdlp.kill('SIGKILL');
