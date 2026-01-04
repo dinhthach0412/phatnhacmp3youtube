@@ -24,9 +24,10 @@ updateProcess.on('close', () => {
 // ============================================================
 // 1. TOOL: TÌM KIẾM NHANH (Dùng yt-dlp search SoundCloud)
 // ============================================================
+// ... (Đoạn trên giữ nguyên)
+
 function getLinkFast(query) {
     return new Promise((resolve) => {
-        // Lọc từ khóa rác
         let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của|tiktok/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
@@ -34,11 +35,15 @@ function getLinkFast(query) {
         
         const args = [
             `scsearch1:${finalQuery}`, 
-            '-f', 'bestaudio/best',    
+            // [FIX QUAN TRỌNG] SỬA DÒNG NÀY
+            // Cũ: '-f', 'bestaudio/best',  <-- Cái này nó hay lôi đầu link m3u8 lỗi về
+            // Mới: Ép lấy protocol http (link trực tiếp) để FFmpeg dễ nuốt
+            '-f', 'bestaudio[protocol^=http]',    
             '--get-url', '--no-playlist', '--no-warnings', '--force-ipv4', '--no-check-certificate'
         ];
 
         const yt = spawn('/usr/local/bin/yt-dlp', args);
+        // ... (Đoạn dưới giữ nguyên)
         let url = '';
 
         yt.stdout.on('data', d => url += d.toString());
