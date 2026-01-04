@@ -1,6 +1,6 @@
 /**
- * Smart Audio Server - TURBO MODE
- * Removed '-re' to fill ESP32 buffer instantly
+ * Smart Audio Server - STABLE CONNECTION
+ * Fix: Keep-Alive for ESP32 multitasking
  */
 
 const express = require('express');
@@ -23,7 +23,7 @@ const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253
 let serverStatus = 'Booting...';
 
 spawn(YTDLP_PATH, ['-U']).on('close', () => {
-    serverStatus = 'Online (Turbo Mode)';
+    serverStatus = 'Online (Stable Mode)';
     console.log('✅ yt-dlp updated');
 });
 
@@ -101,7 +101,7 @@ app.get('/search', async (req, res) => {
 });
 
 // ======================
-// 2. STREAM (TURBO - NO LAG)
+// 2. STREAM (CỐ ĐỊNH KẾT NỐI)
 // ======================
 app.get('/stream', (req, res) => {
     const inputUrl = req.query.url;
@@ -109,13 +109,18 @@ app.get('/stream', (req, res) => {
 
     console.log(`🎧 STREAMING...`);
 
+    // Tinh chỉnh Header để Render không ngắt kết nối sớm
     res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
         'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=60', // Giữ kết nối 60s chờ ESP32
         'Cache-Control': 'no-cache',
         'icy-name': 'Smart Audio',
         'icy-br': '64'
     });
+    
+    // Gửi header ngay lập tức để ESP32 biết kết nối đã thành công
+    res.flushHeaders(); 
 
     const ytdlp = spawn(YTDLP_PATH, [
         inputUrl,
@@ -129,7 +134,6 @@ app.get('/stream', (req, res) => {
 
     const ff = ffmpeg(ytdlp.stdout)
         .inputOptions([
-            // ĐÃ BỎ '-re' Ở ĐÂY ĐỂ TỐC ĐỘ TỐI ĐA
             '-thread_queue_size', '4096' 
         ]) 
         .audioCodec('libmp3lame')
@@ -141,9 +145,10 @@ app.get('/stream', (req, res) => {
             '-vn',
             '-write_xing 0', 
             '-flush_packets 1',
-            '-bufsize', '64k'
+            '-bufsize', '64k' 
         ])
         .on('error', (err) => {
+            // Không log lỗi pipe vớ vẩn
             if (!err.message.includes('EPIPE')) console.error('FFmpeg Error:', err.message);
         });
 
