@@ -18,7 +18,8 @@ app.use(cors());
 // ======================
 const YTDLP_PATH = '/usr/local/bin/yt-dlp';
 const PORT = process.env.PORT || 3000;
-const GIANGOI_RSS_URL = 'https://anchor.fm/s/12c31424/podcast/rss';
+const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss
+';
 
 let serverStatus = 'Booting...';
 
