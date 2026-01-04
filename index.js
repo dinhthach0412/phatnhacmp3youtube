@@ -125,6 +125,7 @@ app.get('/search', async (req, res) => {
 });
 
 // API Stream (FFmpeg xử lý âm thanh)
+// API Stream (FFmpeg xử lý âm thanh - ĐÃ TỐI ƯU TỐC ĐỘ)
 app.get('/stream', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).send("No query");
@@ -133,32 +134,43 @@ app.get('/stream', async (req, res) => {
     const audioUrl = await getAudioUrl(q);
     if (!audioUrl) return res.status(404).send("Not found");
 
+    // Thiết lập Header để ESP32 biết đây là luồng stream
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    console.log("🚀 Streaming...");
+    console.log("🚀 Streaming (Real-time Mode)...");
 
-    // FFmpeg: Volume x2 + MP3 64kbps Mono (Chuẩn ESP32)
+    // FFmpeg: Quan trọng nhất là '-re' ở inputOptions
     ffmpeg(audioUrl)
         .inputOptions([
-            '-reconnect 1', '-reconnect_streamed 1', '-reconnect_delay_max 5',
+            // [QUAN TRỌNG] '-re': Đọc input theo tốc độ thực. 
+            // Giúp Server không gửi dữ liệu ồ ạt làm sập ESP32.
+            '-re', 
+            '-reconnect 1', 
+            '-reconnect_streamed 1', 
+            '-reconnect_delay_max 5',
             '-user_agent "Mozilla/5.0"'
         ])
         .audioFilters([
-            'volume=2.0',        // Tăng âm lượng
-            'alimiter=limit=0.9' // Chống vỡ tiếng (Thêm cái này cho an toàn)
+            'volume=2.0',        
+            'alimiter=limit=0.9' 
         ]) 
         .audioCodec('libmp3lame')
-        .audioBitrate(64)       
-        .audioChannels(1)       // Mono (Bắt buộc)
-        .audioFrequency(44100)  // 44.1kHz (Chuẩn quốc tế cho MP3, ESP32 thích cái này nhất)
+        .audioBitrate(64)       // Bitrate cố định 64k (CBR) giúp luồng ổn định
+        .audioChannels(1)       
+        .audioFrequency(44100)  
         .format('mp3')
         .outputOptions([
-            '-vn', '-flush_packets 1', '-preset ultrafast', 
+            '-vn', 
+            '-flush_packets 1', // Gửi gói tin ngay khi có, không chờ đầy buffer to
+            '-preset ultrafast', 
             '-movflags frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
-            if (!err.message.includes('closed')) console.error('FFmpeg Err:', err.message);
+            // Bỏ qua lỗi đóng kết nối khi ESP32 ngắt trước
+            if (!err.message.includes('closed') && !err.message.includes('EPIPE')) {
+                console.error('FFmpeg Err:', err.message);
+            }
         })
         .pipe(res, { end: true });
 });
