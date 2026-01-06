@@ -39,23 +39,35 @@ function cleanTitle(str) {
 // ======================
 // 1. SEARCH
 // ======================
+// ... (Các phần khai báo giữ nguyên)
+
 app.get('/search', async (req, res) => {
     const q = req.query.q || '';
     if (!q) return res.status(400).json({ error: 'No query' });
 
     console.log(`🔍 Searching: ${q}`);
-    const keyword = q.toLowerCase();
-
-    // --- CASE 1: RSS ---
-    if (keyword.includes('giang oi') || keyword.includes('giangoi') || keyword.includes('podcast')) {
+    
+    // 1. XỬ LÝ LỆNH PODCAST ĐẶC BIỆT (CMD:PODCAST_GIANGOI)
+    // Giúp server nhận diện nhanh, không cần spawn yt-dlp tốn thời gian
+    let keyword = q.toLowerCase();
+    
+    // Nếu là lệnh CMD từ Robot gửi lên
+    if (keyword.includes('cmd:podcast') || keyword.includes('giang oi') || keyword.includes('giangoi')) {
+        console.log("⚡ Mode: PODCAST DETECTED");
         try {
+            // Tải RSS Giang Ơi
             const feed = await parser.parseURL(GIANGOI_RSS_URL);
+            
+            // Lấy bài mới nhất
             const latestItem = feed.items[0]; 
             if (latestItem) {
                 const safeTitle = cleanTitle(latestItem.title);
+                
+                // Tạo link stream (Redirect về Server mình để giữ kết nối Keep-Alive)
                 const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`;
-                console.log(`✅ Found RSS: ${safeTitle}`);
-                console.log(`👉 CLICK TEST: ${streamUrl}`);
+                
+                console.log(`✅ Podcast Found: ${safeTitle}`);
+                
                 return res.json({
                     success: true,
                     title: safeTitle,
@@ -64,10 +76,12 @@ app.get('/search', async (req, res) => {
                 });
             }
         } catch (e) {
-            console.error('RSS Fail');
+            console.error('RSS Error:', e.message);
+            // Nếu lỗi RSS thì fallback xuống tìm YouTube bên dưới
         }
     }
 
+    // ... (Phần tìm kiếm YouTube / SoundCloud bên dưới giữ nguyên) ...
     // --- CASE 2: SOUNDCLOUD ---
     const searchProcess = spawn(YTDLP_PATH, [
         `scsearch1:${q}`, 
