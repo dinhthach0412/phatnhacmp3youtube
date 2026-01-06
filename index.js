@@ -1,175 +1,155 @@
-/**
- * Smart Audio Server - TURBO MODE
- * Removed '-re' to fill ESP32 buffer instantly
- */
-
 const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
-const Parser = require('rss-parser');
+const Parser = require('rss-parser'); // Phải có dòng này
+const path = require('path');
 
 const app = express();
-const parser = new Parser();
+const parser = new Parser(); // Khởi tạo Parser
 app.use(cors());
 
-// ======================
-// CONFIG
-// ======================
-const YTDLP_PATH = '/usr/local/bin/yt-dlp';
-const PORT = process.env.PORT || 3000;
-const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:253460064/sounds.rss';
+const PORT = process.env.PORT || 10000;
 
-let serverStatus = 'Booting...';
+// --- 1. KHAI BÁO CÁC BIẾN QUAN TRỌNG (ĐỪNG XÓA) ---
+const YTDLP_PATH = './yt-dlp'; // Đảm bảo bạn đã có file yt-dlp và chmod +x
 
-spawn(YTDLP_PATH, ['-U']).on('close', () => {
-    serverStatus = 'Online (Turbo Mode)';
-    console.log('✅ yt-dlp updated');
+// Link RSS của Giang Ơi Radio (Lấy từ SoundCloud)
+const GIANGOI_RSS_URL = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss'; 
+
+// Hàm làm sạch tiêu đề (Để robot đọc cho dễ)
+function cleanTitle(title) {
+    if (!title) return "Unknown Track";
+    return title.replace(/\(.*?\)|\[.*?\]/g, '').replace(/\.mp3$/i, '').trim();
+}
+// ----------------------------------------------------
+
+app.get('/', (req, res) => {
+    res.send('Music Server Online - Podcast Ready');
 });
 
-app.get('/', (req, res) => res.send(`Smart Audio Server – ${serverStatus}`));
-
-function cleanTitle(str) {
-    if (!str) return 'Unknown Track';
-    let clean = str.replace(/(\r\n|\n|\r)/gm, " ").trim();
-    if (clean.length > 50) clean = clean.substring(0, 50) + '...';
-    return clean;
-}
-
-// ======================
-// 1. SEARCH
-// ======================
-// ... (Các phần khai báo giữ nguyên)
-
+// ROUTE TÌM KIẾM VÀ TRẢ VỀ LINK
 app.get('/search', async (req, res) => {
     const q = req.query.q || '';
-    if (!q) return res.status(400).json({ error: 'No query' });
+    if (!q) return res.status(400).json({ error: 'No query provided' });
 
     console.log(`🔍 Searching: ${q}`);
     
-    // 1. XỬ LÝ LỆNH PODCAST ĐẶC BIỆT (CMD:PODCAST_GIANGOI)
-    // Giúp server nhận diện nhanh, không cần spawn yt-dlp tốn thời gian
     let keyword = q.toLowerCase();
-    
-    // Nếu là lệnh CMD từ Robot gửi lên
+
+    // --- CASE 1: XỬ LÝ PODCAST GIANG ƠI (Nhanh, không dùng yt-dlp) ---
     if (keyword.includes('cmd:podcast') || keyword.includes('giang oi') || keyword.includes('giangoi')) {
-        console.log("⚡ Mode: PODCAST DETECTED");
+        console.log("⚡ Mode: PODCAST DETECTED - Đang lấy RSS...");
+        
         try {
-            // Tải RSS Giang Ơi
+            // Lấy RSS
             const feed = await parser.parseURL(GIANGOI_RSS_URL);
             
-            // Lấy bài mới nhất
+            // Lấy bài mới nhất (item[0])
+            // Muốn lấy bài ngẫu nhiên thì dùng: feed.items[Math.floor(Math.random() * feed.items.length)]
             const latestItem = feed.items[0]; 
+
             if (latestItem) {
                 const safeTitle = cleanTitle(latestItem.title);
                 
-                // Tạo link stream (Redirect về Server mình để giữ kết nối Keep-Alive)
-                const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(latestItem.enclosure.url)}`;
-                
+                // SoundCloud RSS thường trả về link enclosure direct
+                const audioUrl = latestItem.enclosure ? latestItem.enclosure.url : latestItem.link;
+
+                // Redirect về chính server này để giữ kết nối (Proxy) hoặc trả link gốc
+                // Ở đây trả link gốc cho nhanh:
                 console.log(`✅ Podcast Found: ${safeTitle}`);
                 
                 return res.json({
                     success: true,
                     title: safeTitle,
                     artist: 'Giang Oi Radio',
-                    url: streamUrl
+                    url: audioUrl,  // Link trực tiếp từ RSS
+                    is_podcast: true
                 });
+            } else {
+                console.log("❌ Không tìm thấy bài nào trong RSS");
             }
         } catch (e) {
-            console.error('RSS Error:', e.message);
-            // Nếu lỗi RSS thì fallback xuống tìm YouTube bên dưới
+            console.error('❌ Lỗi RSS:', e.message);
+            // Nếu lỗi RSS thì kệ nó, để nó chạy xuống logic Youtube bên dưới
         }
     }
 
-    // ... (Phần tìm kiếm YouTube / SoundCloud bên dưới giữ nguyên) ...
-    // --- CASE 2: SOUNDCLOUD ---
+    // --- CASE 2: TÌM YOUTUBE / SOUNDCLOUD (Dùng yt-dlp) ---
+    // (Logic cũ giữ nguyên)
+    console.log("🐢 Fallback: Tìm bằng yt-dlp...");
+
     const searchProcess = spawn(YTDLP_PATH, [
-        `scsearch1:${q}`, 
-        '--print', '%(title)s|%(webpage_url)s',
+        '--default-search', 'ytsearch',
+        '--dump-json',
         '--no-playlist',
-        '--no-warnings',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        '--format', 'bestaudio[ext=m4a]/best[ext=mp4]/best', 
+        q // Từ khóa tìm kiếm
     ]);
 
-    let outputData = '';
-    searchProcess.stdout.on('data', d => outputData += d.toString());
+    let output = '';
+    
+    searchProcess.stdout.on('data', (data) => {
+        output += data.toString();
+    });
+
+    searchProcess.stderr.on('data', (data) => {
+        // console.error(`yt-dlp stderr: ${data}`); // Bỏ comment nếu muốn debug
+    });
 
     searchProcess.on('close', (code) => {
-        if (code !== 0 || !outputData.trim()) {
-            return res.json({ success: true, title: 'Not Found', artist: 'System', url: '' });
+        if (code !== 0 || !output) {
+            return res.status(500).json({ error: 'Search failed or no result' });
         }
-        const parts = outputData.trim().split('|');
-        const safeTitle = cleanTitle(parts[0]);
-        const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(parts[1])}`;
-        
-        console.log(`✅ Found SC: ${safeTitle}`);
-        console.log(`👉 CLICK TEST: ${streamUrl}`);
 
-        res.json({
-            success: true,
-            title: safeTitle,
-            artist: 'SoundCloud',
-            url: streamUrl
-        });
+        try {
+            const data = JSON.parse(output);
+            const title = cleanTitle(data.title);
+            
+            // Tạo link stream qua server của mình
+            const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(data.webpage_url)}`;
+            
+            console.log(`✅ YT Found: ${title}`);
+
+            res.json({
+                success: true,
+                title: title,
+                artist: data.uploader || 'Unknown',
+                url: streamUrl 
+            });
+        } catch (e) {
+            console.error('Parse error:', e);
+            res.status(500).json({ error: 'Failed to parse yt-dlp output' });
+        }
     });
 });
 
-// ======================
-// 2. STREAM (TURBO - NO LAG)
-// ======================
+// ROUTE STREAM NHẠC (PROXY)
 app.get('/stream', (req, res) => {
-    const inputUrl = req.query.url;
-    if (!inputUrl) return res.status(400).send('No URL');
+    const videoUrl = req.query.url;
+    if (!videoUrl) return res.status(400).send('No URL provided');
 
-    console.log(`🎧 STREAMING...`);
+    console.log(`▶️ Streaming: ${videoUrl}`);
 
-    res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-        'icy-name': 'Smart Audio',
-        'icy-br': '64'
-    });
-
-    const ytdlp = spawn(YTDLP_PATH, [
-        inputUrl,
-        '-f', 'bestaudio', 
+    const ytDlp = spawn(YTDLP_PATH, [
         '-o', '-',
-        '--no-playlist',
-        '--no-warnings',
-        '--force-ipv4',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        '-f', 'bestaudio', 
+        videoUrl
     ]);
 
-    const ff = ffmpeg(ytdlp.stdout)
-        .inputOptions([
-            // ĐÃ BỎ '-re' Ở ĐÂY ĐỂ TỐC ĐỘ TỐI ĐA
-            '-thread_queue_size', '4096' 
-        ]) 
-        .audioCodec('libmp3lame')
-        .audioBitrate('64k')
-        .audioChannels(1)
-        .audioFrequency(44100)
-        .format('mp3')
-        .outputOptions([
-            '-vn',
-            '-write_xing 0', 
-            '-flush_packets 1',
-            '-bufsize', '64k'
-        ])
-        .on('error', (err) => {
-            if (!err.message.includes('EPIPE')) console.error('FFmpeg Error:', err.message);
-        });
+    res.setHeader('Content-Type', 'audio/mpeg');
+    
+    ytDlp.stdout.pipe(res);
 
-    ff.pipe(res);
+    ytDlp.stderr.on('data', (data) => {
+        // console.error(`Stream stderr: ${data}`);
+    });
 
     req.on('close', () => {
-        console.log('🔌 Disconnected');
-        setTimeout(() => {
-            ytdlp.kill('SIGKILL');
-            ff.kill('SIGKILL');
-        }, 1000);
+        console.log('⏹️ Client disconnected, killing stream.');
+        ytDlp.kill();
     });
 });
 
-app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 News & Music Server running on port ${PORT}`);
+});
