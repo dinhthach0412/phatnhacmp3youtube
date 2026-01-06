@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const Parser = require('rss-parser');
-const https = require('https'); // Dùng thư viện gốc cho nhẹ
+const https = require('https');
 
 const app = express();
 const parser = new Parser();
@@ -11,80 +11,103 @@ app.use(cors());
 const PORT = process.env.PORT || 10000;
 const YTDLP_PATH = './yt-dlp';
 
-// Link RSS Giang Ơi (SoundCloud)
+// RSS Podcast SoundCloud – Giang Ơi
 const GIANGOI_RSS = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
 app.get('/', (req, res) => res.send('Podcast Server Ready'));
 
+/* =========================
+   HÀM RESOLVE AUDIO PODCAST
+   ========================= */
+function resolveSoundCloudAudio(query) {
+    return new Promise((resolve, reject) => {
+        const p = spawn(YTDLP_PATH, [
+            `scsearch1:${query}`,
+            '-f', 'bestaudio',
+            '--no-playlist',
+            '-g'
+        ]);
+
+        let out = '';
+        p.stdout.on('data', d => out += d.toString());
+        p.on('close', () => {
+            out = out.trim();
+            out ? resolve(out) : reject(new Error('yt-dlp failed'));
+        });
+    });
+}
+
+/* =========================
+   API SEARCH
+   ========================= */
 app.get('/search', async (req, res) => {
     const q = (req.query.q || '').toLowerCase();
     console.log(`🔍 Searching: ${q}`);
 
-    // --- CHIẾN THUẬT MỚI: BẮT RSS TRỰC TIẾP ---
+    // ===== PODCAST MODE =====
     if (q.includes('cmd:podcast') || q.includes('giang oi')) {
-        console.log("⚡ Mode: PODCAST - Đọc thẳng RSS (Không dùng yt-dlp)");
-        
+        console.log("🎙 PODCAST MODE (RSS + yt-dlp)");
+
         try {
+            // 1️⃣ Đọc RSS → lấy metadata
             const feed = await parser.parseURL(GIANGOI_RSS);
-            const item = feed.items[0]; // Lấy bài mới nhất
+            const item = feed.items[0];
+            if (!item) throw new Error('RSS empty');
 
-            if (item && item.enclosure && item.enclosure.url) {
-                // Lấy link gốc từ SoundCloud
-                const originalUrl = item.enclosure.url;
-                const title = item.title;
+            const title = item.title;
+            console.log(`📻 RSS Title: ${title}`);
 
-                console.log(`✅ Tìm thấy: ${title}`);
-                
-                // MẸO QUAN TRỌNG:
-                // Link SoundCloud là HTTPS redirect, ESP32 xử lý rất cực.
-                // Chúng ta sẽ biến Server Render thành cái "Trung gian" (Proxy).
-                // Robot chỉ cần gọi link của Server mình, Server mình sẽ bơm dữ liệu về.
-                const proxyUrl = `https://${req.get('host')}/proxy?url=${encodeURIComponent(originalUrl)}`;
+            // 2️⃣ Resolve audio THẬT bằng yt-dlp
+            const audioUrl = await resolveSoundCloudAudio(title);
+            console.log(`🎧 Audio URL resolved`);
 
-                return res.json({
-                    success: true,
-                    title: title, // Tên bài
-                    artist: "Giang Oi Radio",
-                    url: proxyUrl // Link Proxy (An toàn cho ESP32)
-                });
-            }
+            // 3️⃣ Proxy cho ESP32/XiaoZhi
+            const proxyUrl = `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`;
+
+            return res.json({
+                success: true,
+                title,
+                artist: 'Giang Ơi Radio',
+                url: proxyUrl
+            });
+
         } catch (e) {
-            console.error("Lỗi RSS:", e.message);
-            // Nếu lỗi thì chạy xuống fallback Youtube bên dưới
+            console.error('❌ Podcast error:', e.message);
+            return res.json({ success: false, error: 'Podcast not available' });
         }
     }
 
-    // --- FALLBACK: TÌM YOUTUBE (Giữ nguyên code cũ) ---
-    // (Đoạn code yt-dlp cũ của bạn để ở đây...)
-    // ...
+    // ===== FALLBACK (nếu bạn muốn gắn nhạc/youtube sau) =====
+    return res.json({ success: false, error: 'No match' });
 });
 
-// --- HÀM MỚI: PROXY STREAMING (Quan trọng để trị file dài) ---
-// Hàm này giúp ESP32 "ăn từng miếng" mà không cần lo HTTPS hay Redirect
-app.get('/proxy', (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).end();
-
-    console.log(`▶️ Proxying: ${targetUrl}`);
-
-    https.get(targetUrl, (stream) => {
-        // Xử lý Redirect (SoundCloud hay có trò này)
-        if (stream.statusCode === 301 || stream.statusCode === 302) {
-            return res.redirect(stream.headers.location);
+/* =========================
+   PROXY STREAM (CHUẨN ESP32)
+   ========================= */
+function proxyStream(url, res) {
+    https.get(url, stream => {
+        // Xử lý redirect vô hạn (SoundCloud hay dùng)
+        if ([301, 302].includes(stream.statusCode)) {
+            return proxyStream(stream.headers.location, res);
         }
 
-        // Set Header trả về là MP3
         res.setHeader('Content-Type', 'audio/mpeg');
-        
-        // Nối ống bơm dữ liệu thẳng từ SoundCloud về ESP32
-        stream.pipe(res); 
-
-    }).on('error', (e) => {
-        console.error("Proxy Error:", e.message);
+        stream.pipe(res);
+    }).on('error', err => {
+        console.error('Proxy error:', err.message);
         res.end();
     });
+}
+
+app.get('/proxy', (req, res) => {
+    if (!req.query.url) return res.end();
+    console.log(`▶️ Proxying audio`);
+    proxyStream(req.query.url, res);
 });
 
+/* =========================
+   START SERVER
+   ========================= */
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on ${PORT}`);
+    console.log(`🚀 Podcast server running on port ${PORT}`);
 });
