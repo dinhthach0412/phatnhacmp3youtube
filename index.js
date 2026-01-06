@@ -74,8 +74,6 @@ app.get('/search', async (req, res) => {
         }
     }
 
-    // --- CASE 2: TÌM YOUTUBE / SOUNDCLOUD (Dùng yt-dlp) ---
-    // (Logic cũ giữ nguyên)
     console.log("🐢 Fallback: Tìm bằng yt-dlp...");
 
     const searchProcess = spawn(YTDLP_PATH, [
@@ -83,7 +81,7 @@ app.get('/search', async (req, res) => {
         '--dump-json',
         '--no-playlist',
         '--format', 'bestaudio[ext=m4a]/best[ext=mp4]/best', 
-        q // Từ khóa tìm kiếm
+        q 
     ]);
 
     let output = '';
@@ -92,20 +90,29 @@ app.get('/search', async (req, res) => {
         output += data.toString();
     });
 
-    searchProcess.stderr.on('data', (data) => {
-        // console.error(`yt-dlp stderr: ${data}`); // Bỏ comment nếu muốn debug
+    // --- THÊM: XỬ LÝ NẾU KHÔNG CHẠY ĐƯỢC LỆNH (VÍ DỤ CHƯA CÀI TOOL) ---
+    searchProcess.on('error', (err) => {
+        console.error('❌ Lỗi chạy yt-dlp:', err);
+        // Trả về JSON báo lỗi để Robot biết đường mà thoát
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: 'Server Error: Tool not found' });
+        }
     });
 
     searchProcess.on('close', (code) => {
         if (code !== 0 || !output) {
-            return res.status(500).json({ error: 'Search failed or no result' });
+            console.log("❌ Tìm kiếm thất bại hoặc không có kết quả.");
+            if (!res.headersSent) {
+                // Trả về báo lỗi cho Robot
+                return res.json({ success: false, error: 'Không tìm thấy bài hát' });
+            }
+            return;
         }
 
         try {
+            // ... (Đoạn parse JSON giữ nguyên) ...
             const data = JSON.parse(output);
             const title = cleanTitle(data.title);
-            
-            // Tạo link stream qua server của mình
             const streamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(data.webpage_url)}`;
             
             console.log(`✅ YT Found: ${title}`);
@@ -118,10 +125,9 @@ app.get('/search', async (req, res) => {
             });
         } catch (e) {
             console.error('Parse error:', e);
-            res.status(500).json({ error: 'Failed to parse yt-dlp output' });
+            if (!res.headersSent) res.status(500).json({ success: false, error: 'Parse Error' });
         }
     });
-});
 
 // ROUTE STREAM NHẠC (PROXY)
 app.get('/stream', (req, res) => {
