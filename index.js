@@ -1,15 +1,15 @@
 /**
- * 🎵 SOUNDCLOUD SERVER V4 (FIXED LOGIC & USER-AGENT)
- * - Fix lỗi "Download 60KB EOF": Thêm User-Agent giả lập Chrome
- * - Fix lỗi Logic: Tách biệt Podcast và Music, không đè nhau
- * - Hỗ trợ Range Proxy (An toàn cho ESP32)
+ * 🎵 SOUNDCLOUD SERVER V5 (LIVE PIPE EDITION)
+ * - Khắc phục triệt để lỗi 60KB (HTML Error Page)
+ * - Cơ chế: Dùng yt-dlp tải và bơm trực tiếp (Stream Pipe)
+ * - Không cần lấy link trung gian -> Tránh bị SoundCloud chặn Token
  */
 
 const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const Parser = require('rss-parser');
-const https = require('https');
+// Bỏ luôn thư viện https vì không dùng Node để tải nữa
 
 const app = express();
 const parser = new Parser();
@@ -21,85 +21,65 @@ const YTDLP_PATH = './yt-dlp';
 // RSS Podcast Giang Ơi
 const GIANGOI_RSS = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-app.get('/', (req, res) => res.send('🔥 SoundCloud Server V4 Ready'));
+app.get('/', (req, res) => res.send('🔥 SoundCloud Server V5 (Live Pipe) Ready'));
 
 /* =========================================
-   1. HÀM PROXY THÔNG MINH (CÓ USER-AGENT)
+   1. HÀM STREAM TRỰC TIẾP (QUAN TRỌNG NHẤT)
+   - Thay vì Node.js tải, ta bắt yt-dlp tải và phun ra stdout
+   - Node.js chỉ việc hứng stdout và ném về cho ESP32
    ========================================= */
-function smartProxy(targetUrl, clientReq, clientRes) {
-    let u;
-    try {
-        u = new URL(targetUrl);
-    } catch (e) {
-        console.error("❌ Invalid URL:", targetUrl);
-        return clientRes.status(400).end();
-    }
-
-    const options = {
-        hostname: u.hostname,
-        path: u.pathname + u.search,
-        headers: {
-            // [QUAN TRỌNG] Giả danh Chrome để SoundCloud không chặn (Fix lỗi 60KB)
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://soundcloud.com/'
-        }
-    };
-
-    // Chuyển tiếp Range Header từ ESP32
-    if (clientReq.headers.range) {
-        options.headers['Range'] = clientReq.headers.range;
-    }
-
-    https.get(options, (stream) => {
-        // Xử lý Redirect (301, 302)
-        if ([301, 302, 303, 307].includes(stream.statusCode)) {
-            return smartProxy(stream.headers.location, clientReq, clientRes);
-        }
-
-        // Nếu SoundCloud chặn (403/404) -> Báo lỗi ngay
-        if (stream.statusCode >= 400) {
-            console.error(`❌ Proxy Error: SoundCloud trả về ${stream.statusCode}`);
-            return clientRes.status(stream.statusCode).end();
-        }
-
-        // Trả về Header cho ESP32
-        if (stream.statusCode === 206 || stream.headers['content-range']) {
-            clientRes.statusCode = 206;
-            if (stream.headers['content-range']) {
-                clientRes.setHeader('Content-Range', stream.headers['content-range']);
-            }
-        } else {
-            clientRes.statusCode = stream.statusCode;
-        }
-
-        clientRes.setHeader('Content-Type', 'audio/mpeg');
-        clientRes.setHeader('Accept-Ranges', 'bytes');
-        clientRes.setHeader('Cache-Control', 'no-cache');
-
-        stream.pipe(clientRes);
-
-    }).on('error', (err) => {
-        console.error('❌ Proxy Socket Error:', err.message);
-        if (!clientRes.headersSent) clientRes.status(500).end();
-    });
-}
-
 app.get('/proxy', (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).end();
-    smartProxy(url, req, res);
+
+    console.log(`▶️ Live Streaming: ${url}`);
+
+    // Cấu hình yt-dlp để stream trực tiếp (dùng tài nguyên của nó để fake browser)
+    const args = [
+        '-o', '-',             // Quan trọng: In dữ liệu ra màn hình (stdout) để Node hứng
+        '-f', 'bestaudio',     // Lấy âm thanh tốt nhất
+        '--no-playlist',
+        '--no-part',           // Không tạo file .part
+        '--buffer-size', '16K', // Buffer nhỏ để stream mượt
+        url
+    ];
+
+    // Spawn tiến trình yt-dlp
+    const ytDlpProcess = spawn(YTDLP_PATH, args);
+
+    // Set Header trả về cho ESP32
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Transfer-Encoding', 'chunked'); // Báo cho ESP32 biết là dữ liệu stream liên tục
+
+    // NỐI ỐNG: yt-dlp (stdout) ===> ESP32 (res)
+    ytDlpProcess.stdout.pipe(res);
+
+    // Xử lý lỗi
+    ytDlpProcess.stderr.on('data', (data) => {
+        // console.error(`[Stream Log]: ${data}`); // Bật lên nếu muốn debug
+    });
+
+    ytDlpProcess.on('close', (code) => {
+        if (code !== 0) console.log(`Stream kết thúc với mã: ${code}`);
+        res.end();
+    });
+
+    // Khi ESP32 ngắt kết nối (tắt loa), giết luôn yt-dlp để đỡ tốn RAM server
+    req.on('close', () => {
+        console.log('🛑 Client ngắt kết nối -> Kill yt-dlp');
+        ytDlpProcess.kill();
+    });
 });
 
 /* =========================================
-   2. HÀM TÌM KIẾM SOUNDCLOUD (YTDLP)
+   2. HÀM TÌM KIẾM SOUNDCLOUD
    ========================================= */
 function searchSoundCloud(query) {
     return new Promise((resolve, reject) => {
         const proc = spawn(YTDLP_PATH, [
             `scsearch1:${query}`, 
             '--dump-json',        
-            '--no-playlist',
-            '--format', 'bestaudio/best' 
+            '--no-playlist'
         ]);
 
         let output = '';
@@ -118,13 +98,13 @@ function searchSoundCloud(query) {
 }
 
 /* =========================================
-   3. API TÌM KIẾM (ĐÃ TÁCH LUỒNG)
+   3. API TÌM KIẾM (TRẢ VỀ LINK GỐC, KHÔNG PHẢI LINK TOKEN)
    ========================================= */
 app.get('/search', async (req, res) => {
     const q = (req.query.q || '').toLowerCase();
     console.log(`🔍 Search: ${q}`);
 
-    // --- LUỒNG 1: PODCAST (Ưu tiên RSS) ---
+    // --- LUỒNG 1: PODCAST (RSS) ---
     if (q.includes('cmd:podcast') || q.includes('giang oi')) {
         console.log('🎙 Mode: PODCAST (RSS)');
         try {
@@ -132,6 +112,8 @@ app.get('/search', async (req, res) => {
             const item = feed.items[0];
 
             if (item) {
+                // Lấy Link Gốc (thường là link feedproxy hoặc soundcloud direct)
+                // V5: Cứ ném link gốc cho yt-dlp xử lý, nó cân tất
                 const audioUrl = item.enclosure ? item.enclosure.url : item.link;
                 const proxyUrl = `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`;
 
@@ -139,25 +121,31 @@ app.get('/search', async (req, res) => {
                     success: true,
                     title: item.title,
                     artist: 'Giang Oi Radio',
-                    url: proxyUrl, 
+                    url: proxyUrl,
                     is_podcast: true
                 });
             }
         } catch (e) {
             console.error('RSS Error:', e.message);
-            return res.json({ success: false, error: 'Lỗi lấy RSS Podcast' });
+            return res.json({ success: false, error: 'Lỗi RSS' });
         }
-        // [QUAN TRỌNG] Nếu chạy đến đây mà không return thì return lỗi luôn, KHÔNG nhảy xuống Music
         return res.json({ success: false, error: 'Không tìm thấy Podcast' });
     }
 
-    // --- LUỒNG 2: NHẠC SOUNDCLOUD (Chỉ chạy khi KHÔNG PHẢI podcast) ---
+    // --- LUỒNG 2: NHẠC SOUNDCLOUD ---
     console.log("☁️ Mode: SOUNDCLOUD MUSIC");
     try {
         const data = await searchSoundCloud(q);
-        const proxyUrl = `https://${req.get('host')}/proxy?url=${encodeURIComponent(data.url)}`;
+        
+        // [CỰC KỲ QUAN TRỌNG - THAY ĐỔI LỚN Ở V5]
+        // Ở V4: Ta lấy data.url (link token dài ngoằng) -> Dễ bị chặn
+        // Ở V5: Ta lấy data.webpage_url (link gốc: soundcloud.com/user/bai-hat)
+        // Lý do: Đưa link gốc cho yt-dlp ở hàm /proxy, nó sẽ tự lo việc lách luật.
+        
+        const safeLink = data.webpage_url || data.url; 
+        const proxyUrl = `https://${req.get('host')}/proxy?url=${encodeURIComponent(safeLink)}`;
 
-        console.log(`✅ Found SC: ${data.title}`);
+        console.log(`✅ Found SC (Webpage): ${data.title}`);
         return res.json({
             success: true,
             title: data.title,
@@ -172,5 +160,5 @@ app.get('/search', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 SoundCloud Server V4 running on port ${PORT}`);
+    console.log(`🚀 SoundCloud V5 (Live Pipe) running on port ${PORT}`);
 });
