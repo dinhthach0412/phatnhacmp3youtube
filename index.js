@@ -130,6 +130,9 @@ app.get('/stream', (req, res) => {
             '-reconnect 1', 
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
+            // [THÊM MỚI] Giảm thời gian phân tích để phát ngay lập tức
+            '-analyzeduration 0', 
+            '-probesize 32', 
             '-user_agent "Mozilla/5.0"'
         ])
         .audioFilters(['volume=2.0']) 
@@ -141,8 +144,8 @@ app.get('/stream', (req, res) => {
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0', 
-            '-flush_packets', '1',
-            '-preset', 'ultrafast',
+            '-flush_packets', '1',        // Bơm gói tin đi ngay lập tức
+            '-preset', 'ultrafast',       // Xử lý siêu tốc
             '-movflags', 'frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
