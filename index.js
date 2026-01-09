@@ -1,161 +1,196 @@
 /**
- * 🎵 ULTRA SERVER V9 (SMART FALLBACK)
- * - Tự động cập nhật yt-dlp
- * - Fix lỗi Podcast: Nếu RSS chết -> Tự động tìm kiếm trên SoundCloud
- * - Fix lỗi M3U8 & 60KB (Dùng FFmpeg Transcode)
+ * 🔥 ULTRA SERVER V10 – SOUNDSTREAM ENGINE
+ *
+ * ✔ Music + Podcast = 1 pipeline
+ * ✔ RSS chỉ dùng làm metadata
+ * ✔ yt-dlp resolve audio thật
+ * ✔ Proxy stream hỗ trợ HTTP Range
+ * ✔ KHÔNG ffmpeg – KHÔNG HLS
+ * ✔ ESP32 / XiaoZhi friendly
  */
 
 const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
 const Parser = require('rss-parser');
+const https = require('https');
 
 const app = express();
 const parser = new Parser();
 app.use(cors());
 
 const PORT = process.env.PORT || 10000;
-const YTDLP_PATH = './yt-dlp'; 
+const YTDLP_PATH = './yt-dlp';
 
-// RSS Podcast (Nếu link này chết, Server sẽ tự tìm kiếm thay thế)
-const GIANGOI_RSS = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
+// RSS Podcast Giang Ơi
+const GIANGOI_RSS =
+  'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-app.get('/', (req, res) => res.send('🔥 Server V9 (Smart Fallback) Ready'));
+// Cache nhẹ: query -> { url, expire }
+const audioCache = new Map();
+const CACHE_TTL = 60 * 60 * 1000; // 1 giờ
 
-// --- HÀM TÌM KIẾM SOUNDCLOUD (Dùng khi RSS lỗi) ---
-function searchSoundCloud(query) {
-    return new Promise((resolve, reject) => {
-        const args = [
-            `scsearch1:${query}`, 
-            '--get-url',       
-            '--no-playlist', 
-            '--no-warnings',
-            '--format', 'bestaudio/best'
-        ];
+app.get('/', (req, res) => {
+  res.send('🔥 ULTRA SERVER V10 READY');
+});
 
-        const yt = spawn(YTDLP_PATH, args);
-        let url = '';
-
-        yt.stdout.on('data', d => url += d.toString());
-        
-        yt.on('close', code => {
-            const finalUrl = url.trim().split('\n')[0];
-            if (code === 0 && finalUrl) {
-                resolve({
-                    url: finalUrl,
-                    title: query // Tạm dùng query làm title
-                });
-            } else {
-                resolve(null);
-            }
-        });
-    });
-}
-
-// --- API TÌM KIẾM THÔNG MINH ---
-app.get('/search', async (req, res) => {
-    const q = (req.query.q || '').toLowerCase();
-    console.log(`🔍 Search: ${q}`);
-
-    // --- 1. XỬ LÝ PODCAST ---
-    if (q.includes('cmd:podcast') || q.includes('giang oi')) {
-        console.log("🎙 Mode: PODCAST");
-        
-        // CÁCH 1: Thử lấy qua RSS (Nhanh, chuẩn)
-        try {
-            const feed = await parser.parseURL(GIANGOI_RSS);
-            const item = feed.items[0]; // Lấy bài mới nhất
-            if (item) {
-                const audioUrl = item.enclosure ? item.enclosure.url : item.link;
-                console.log(`✅ RSS Success: ${item.title}`);
-                const myStreamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(audioUrl)}`;
-                return res.json({ 
-                    success: true, 
-                    title: item.title, 
-                    artist: 'Giang Oi Radio', 
-                    url: myStreamUrl, 
-                    is_podcast: true 
-                });
-            }
-        } catch (e) {
-            console.error('⚠️ RSS Failed (Chuyển sang tìm kiếm):', e.message);
-        }
-
-        // CÁCH 2: RSS lỗi -> Chuyển sang tìm kiếm thủ công (FALLBACK)
-        console.log("🔄 Fallback: Searching SoundCloud...");
-        const fallbackData = await searchSoundCloud("Giang Oi Radio Podcast");
-        
-        if (fallbackData) {
-            console.log(`✅ Fallback Success: ${fallbackData.url}`);
-            const myStreamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(fallbackData.url)}`;
-            return res.json({ 
-                success: true, 
-                title: "Giang Oi Podcast (Auto)", 
-                artist: 'Giang Oi', 
-                url: myStreamUrl,
-                is_podcast: true
-            });
-        }
-
-        return res.json({ success: false, error: 'Podcast Not Found' });
+/* ======================================================
+   1. RESOLVE AUDIO SOUNDCLOUD (NHẠC + PODCAST)
+   ====================================================== */
+function resolveSoundCloud(query) {
+  return new Promise((resolve, reject) => {
+    // Check cache
+    const cached = audioCache.get(query);
+    if (cached && cached.expire > Date.now()) {
+      return resolve(cached.url);
     }
 
-    // --- 2. XỬ LÝ NHẠC THƯỜNG ---
-    const searchData = await searchSoundCloud(q);
-    if (!searchData) return res.json({ success: false, error: 'Not found' });
+    const yt = spawn(YTDLP_PATH, [
+      `scsearch1:${query}`,
+      '-f', 'bestaudio',
+      '--no-playlist',
+      '-g',
+      '--no-warnings'
+    ]);
 
-    const myStreamUrl = `https://${req.get('host')}/stream?url=${encodeURIComponent(searchData.url)}`;
-    
-    res.json({ 
-        success: true, 
-        title: q, 
-        artist: "SoundCloud", 
-        url: myStreamUrl 
+    let out = '';
+    yt.stdout.on('data', d => out += d.toString());
+
+    yt.on('close', code => {
+      const url = out.trim().split('\n')[0];
+      if (code === 0 && url) {
+        audioCache.set(query, {
+          url,
+          expire: Date.now() + CACHE_TTL
+        });
+        resolve(url);
+      } else {
+        reject(new Error('yt-dlp resolve failed'));
+      }
     });
+  });
+}
+
+/* ======================================================
+   2. SEARCH API (NHẠC + PODCAST)
+   ====================================================== */
+app.get('/search', async (req, res) => {
+  const q = (req.query.q || '').toLowerCase();
+  console.log(`🔍 Search: ${q}`);
+
+  // ===== PODCAST MODE =====
+  if (q.includes('cmd:podcast') || q.includes('giang oi')) {
+    console.log('🎙 PODCAST MODE');
+
+    let title = null;
+
+    // 1️⃣ RSS → lấy title tập mới
+    try {
+      const feed = await parser.parseURL(GIANGOI_RSS);
+      if (feed.items && feed.items.length > 0) {
+        title = feed.items[0].title;
+        console.log(`📻 RSS title: ${title}`);
+      }
+    } catch (e) {
+      console.warn('⚠️ RSS failed, fallback to search');
+    }
+
+    // 2️⃣ Nếu RSS lỗi → fallback keyword
+    if (!title) {
+      title = 'Giang Oi Radio Podcast';
+    }
+
+    try {
+      const audioUrl = await resolveSoundCloud(title);
+      const proxyUrl =
+        `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`;
+
+      return res.json({
+        success: true,
+        mode: 'podcast',
+        title,
+        artist: 'Giang Ơi Radio',
+        url: proxyUrl
+      });
+
+    } catch (e) {
+      return res.json({ success: false, error: 'Podcast resolve failed' });
+    }
+  }
+
+  // ===== MUSIC MODE =====
+  try {
+    const audioUrl = await resolveSoundCloud(q);
+    const proxyUrl =
+      `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`;
+
+    return res.json({
+      success: true,
+      mode: 'music',
+      title: q,
+      artist: 'SoundCloud',
+      url: proxyUrl
+    });
+
+  } catch (e) {
+    return res.json({ success: false, error: 'Music not found' });
+  }
 });
 
-// --- API STREAM (FFMPEG TRANSCODE) ---
-app.get('/stream', (req, res) => {
-    const url = req.query.url;
-    if (!url) return res.status(400).send("No URL");
+/* ======================================================
+   3. PROXY STREAM – RANGE SUPPORT (TRÁI TIM HỆ THỐNG)
+   ====================================================== */
+function proxyStream(targetUrl, clientReq, clientRes) {
+  let u;
+  try {
+    u = new URL(targetUrl);
+  } catch {
+    return clientRes.status(400).end();
+  }
 
-    console.log("🚀 Streaming...");
+  const headers = {};
+  if (clientReq.headers.range) {
+    headers.Range = clientReq.headers.range;
+  }
 
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Transfer-Encoding', 'chunked');
+  https.get({
+    hostname: u.hostname,
+    path: u.pathname + u.search,
+    headers
+  }, stream => {
 
-    ffmpeg(url)
-        .inputOptions([
-            '-reconnect 1', 
-            '-reconnect_streamed 1', 
-            '-reconnect_delay_max 5',
-            // [THÊM MỚI] Giảm thời gian phân tích để phát ngay lập tức
-            '-analyzeduration 0', 
-            '-probesize 32', 
-            '-user_agent "Mozilla/5.0"'
-        ])
-        .audioFilters(['volume=2.0']) 
-        .audioCodec('libmp3lame')     
-        .audioBitrate(128)            
-        .audioChannels(1)             
-        .audioFrequency(44100)        
-        .format('mp3')                
-        .outputOptions([
-            '-vn', '-map_metadata', '-1',
-            '-id3v2_version', '0', 
-            '-flush_packets', '1',        // Bơm gói tin đi ngay lập tức
-            '-preset', 'ultrafast',       // Xử lý siêu tốc
-            '-movflags', 'frag_keyframe+empty_moov'
-        ])
-        .on('error', (err) => {
-            if (!err.message.includes('Output stream closed')) {
-                // console.error('FFmpeg Err:', err.message);
-            }
-        })
-        .pipe(res, { end: true });
+    // Follow redirect vô hạn (SoundCloud rất hay làm)
+    if ([301, 302, 303, 307].includes(stream.statusCode)) {
+      return proxyStream(stream.headers.location, clientReq, clientRes);
+    }
+
+    clientRes.statusCode = stream.statusCode;
+    clientRes.setHeader('Content-Type', 'audio/mpeg');
+    clientRes.setHeader('Accept-Ranges', 'bytes');
+    clientRes.setHeader('Cache-Control', 'no-cache');
+
+    if (stream.headers['content-range']) {
+      clientRes.setHeader('Content-Range', stream.headers['content-range']);
+    }
+
+    stream.pipe(clientRes);
+
+  }).on('error', err => {
+    console.error('❌ Proxy error:', err.message);
+    if (!clientRes.headersSent) clientRes.end();
+  });
+}
+
+app.get('/proxy', (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).end();
+  console.log('▶️ Proxy streaming');
+  proxyStream(url, req, res);
 });
 
+/* ======================================================
+   4. START SERVER
+   ====================================================== */
 app.listen(PORT, () => {
-    console.log(`🚀 Server V9 running on port ${PORT}`);
+  console.log(`🚀 ULTRA SERVER V10 running on port ${PORT}`);
 });
