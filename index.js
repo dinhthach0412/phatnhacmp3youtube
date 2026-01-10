@@ -1,12 +1,12 @@
 /**
- * 🔥 ULTRA SERVER V10 – SOUNDSTREAM ENGINE
+ * 🔥 ULTRA SERVER V10.1 – ESP32 SAFE AUDIO STREAM
  *
- * ✔ Music + Podcast = 1 pipeline
- * ✔ RSS chỉ dùng làm metadata
- * ✔ yt-dlp resolve audio thật
- * ✔ Proxy stream hỗ trợ HTTP Range
- * ✔ KHÔNG ffmpeg – KHÔNG HLS
- * ✔ ESP32 / XiaoZhi friendly
+ * FIXED:
+ *  - ❌ Không trả m3u8 / HLS
+ *  - ❌ Không FFmpeg
+ *  - ✅ Podcast phát như nhạc
+ *  - ✅ yt-dlp ép audio thô (mp3/opus)
+ *  - ✅ Proxy HTTP Range
  */
 
 const express = require('express');
@@ -22,24 +22,25 @@ app.use(cors());
 const PORT = process.env.PORT || 10000;
 const YTDLP_PATH = './yt-dlp';
 
-// RSS Podcast Giang Ơi
+// RSS Podcast (chỉ dùng làm metadata)
 const GIANGOI_RSS =
   'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-// Cache nhẹ: query -> { url, expire }
+// Cache nhẹ: tránh gọi yt-dlp liên tục
 const audioCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000; // 1 giờ
 
 app.get('/', (req, res) => {
-  res.send('🔥 ULTRA SERVER V10 READY');
+  res.send('🔥 ULTRA SERVER V10.1 READY (NO M3U8)');
 });
 
 /* ======================================================
-   1. RESOLVE AUDIO SOUNDCLOUD (NHẠC + PODCAST)
+   1. RESOLVE SOUNDCLOUD AUDIO (ÉP KHÔNG HLS)
    ====================================================== */
 function resolveSoundCloud(query) {
   return new Promise((resolve, reject) => {
-    // Check cache
+
+    // Cache
     const cached = audioCache.get(query);
     if (cached && cached.expire > Date.now()) {
       return resolve(cached.url);
@@ -47,10 +48,13 @@ function resolveSoundCloud(query) {
 
     const yt = spawn(YTDLP_PATH, [
       `scsearch1:${query}`,
-      '-f', 'bestaudio',
+
+      // 🔥 CẤM m3u8 / HLS – Ưu tiên mp3
+      '-f', 'ba[ext=mp3]/ba[protocol!=m3u8]/ba',
+
       '--no-playlist',
-      '-g',
-      '--no-warnings'
+      '--no-warnings',
+      '-g'
     ]);
 
     let out = '';
@@ -58,6 +62,12 @@ function resolveSoundCloud(query) {
 
     yt.on('close', code => {
       const url = out.trim().split('\n')[0];
+
+      // 🚨 BẮT BUỘC: không cho m3u8 lọt qua
+      if (!url || url.includes('.m3u8')) {
+        return reject(new Error('Resolved HLS/m3u8 – rejected'));
+      }
+
       if (code === 0 && url) {
         audioCache.set(query, {
           url,
@@ -72,19 +82,19 @@ function resolveSoundCloud(query) {
 }
 
 /* ======================================================
-   2. SEARCH API (NHẠC + PODCAST)
+   2. SEARCH API – MUSIC + PODCAST
    ====================================================== */
 app.get('/search', async (req, res) => {
   const q = (req.query.q || '').toLowerCase();
   console.log(`🔍 Search: ${q}`);
 
-  // ===== PODCAST MODE =====
+  /* ---------- PODCAST MODE ---------- */
   if (q.includes('cmd:podcast') || q.includes('giang oi')) {
     console.log('🎙 PODCAST MODE');
 
     let title = null;
 
-    // 1️⃣ RSS → lấy title tập mới
+    // 1️⃣ RSS → lấy title mới nhất
     try {
       const feed = await parser.parseURL(GIANGOI_RSS);
       if (feed.items && feed.items.length > 0) {
@@ -92,10 +102,10 @@ app.get('/search', async (req, res) => {
         console.log(`📻 RSS title: ${title}`);
       }
     } catch (e) {
-      console.warn('⚠️ RSS failed, fallback to search');
+      console.warn('⚠️ RSS failed, fallback to keyword');
     }
 
-    // 2️⃣ Nếu RSS lỗi → fallback keyword
+    // 2️⃣ RSS fail → fallback keyword
     if (!title) {
       title = 'Giang Oi Radio Podcast';
     }
@@ -114,11 +124,12 @@ app.get('/search', async (req, res) => {
       });
 
     } catch (e) {
-      return res.json({ success: false, error: 'Podcast resolve failed' });
+      console.error('❌ Podcast resolve failed:', e.message);
+      return res.json({ success: false, error: 'Podcast not playable' });
     }
   }
 
-  // ===== MUSIC MODE =====
+  /* ---------- MUSIC MODE ---------- */
   try {
     const audioUrl = await resolveSoundCloud(q);
     const proxyUrl =
@@ -133,12 +144,13 @@ app.get('/search', async (req, res) => {
     });
 
   } catch (e) {
+    console.error('❌ Music resolve failed:', e.message);
     return res.json({ success: false, error: 'Music not found' });
   }
 });
 
 /* ======================================================
-   3. PROXY STREAM – RANGE SUPPORT (TRÁI TIM HỆ THỐNG)
+   3. PROXY STREAM – RANGE SUPPORT (ESP32 CORE)
    ====================================================== */
 function proxyStream(targetUrl, clientReq, clientRes) {
   let u;
@@ -159,7 +171,7 @@ function proxyStream(targetUrl, clientReq, clientRes) {
     headers
   }, stream => {
 
-    // Follow redirect vô hạn (SoundCloud rất hay làm)
+    // Redirect follow (SoundCloud hay dùng)
     if ([301, 302, 303, 307].includes(stream.statusCode)) {
       return proxyStream(stream.headers.location, clientReq, clientRes);
     }
@@ -192,5 +204,5 @@ app.get('/proxy', (req, res) => {
    4. START SERVER
    ====================================================== */
 app.listen(PORT, () => {
-  console.log(`🚀 ULTRA SERVER V10 running on port ${PORT}`);
+  console.log(`🚀 ULTRA SERVER V10.1 running on port ${PORT}`);
 });
