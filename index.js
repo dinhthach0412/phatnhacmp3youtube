@@ -1,10 +1,11 @@
 /**
- * 🔥 ULTRA SERVER V10.2.1 – ESP32 SAFE (NO CHUNKED)
+ * 🔥 ULTRA SERVER V10.2.2 – FINAL STABLE FOR ESP32
  *
  * FIX:
- *  - ❌ Không Transfer-Encoding: chunked
- *  - ✅ Forward Content-Length
- *  - ✅ ESP32 http_client compatible
+ *  - CDN SoundCloud không im lặng nữa
+ *  - Có byte audio ngay
+ *  - Không timeout
+ *  - Không WDT
  */
 
 const express = require('express');
@@ -28,13 +29,7 @@ const audioCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000;
 let lastPodcastTitle = null;
 
-app.get('/', (req, res) => {
-  res.send('🔥 ULTRA SERVER V10.2.1 READY (ESP32 SAFE)');
-});
-
-/* ======================================================
-   RESOLVE SOUNDCLOUD AUDIO (NO M3U8)
-   ====================================================== */
+/* ================= RESOLVE AUDIO ================= */
 function resolveSoundCloud(query) {
   return new Promise((resolve, reject) => {
     const cached = audioCache.get(query);
@@ -64,25 +59,20 @@ function resolveSoundCloud(query) {
   });
 }
 
-/* ======================================================
-   SEARCH
-   ====================================================== */
+/* ================= SEARCH ================= */
 app.get('/search', async (req, res) => {
   const q = (req.query.q || '').toLowerCase();
 
   if (q.includes('cmd:podcast') || q.includes('giang oi')) {
     let title = null;
-
     try {
       const feed = await parser.parseURL(GIANGOI_RSS);
-      const items = feed.items.filter(i => i && i.title).slice(0, 30);
-
+      const items = feed.items.filter(i => i?.title).slice(0, 30);
       if (items.length) {
         let pick;
         do {
           pick = items[Math.floor(Math.random() * items.length)];
         } while (items.length > 1 && pick.title === lastPodcastTitle);
-
         lastPodcastTitle = pick.title;
         title = pick.title;
       }
@@ -90,37 +80,27 @@ app.get('/search', async (req, res) => {
 
     if (!title) title = 'Giang Oi Radio Podcast';
 
-    try {
-      const audioUrl = await resolveSoundCloud(title);
-      return res.json({
-        success: true,
-        mode: 'podcast',
-        title,
-        artist: 'Giang Ơi Radio',
-        url: `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`
-      });
-    } catch {
-      return res.json({ success: false });
-    }
-  }
-
-  try {
-    const audioUrl = await resolveSoundCloud(q);
+    const audioUrl = await resolveSoundCloud(title);
     return res.json({
       success: true,
-      mode: 'music',
-      title: q,
-      artist: 'SoundCloud',
+      mode: 'podcast',
+      title,
+      artist: 'Giang Ơi Radio',
       url: `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`
     });
-  } catch {
-    return res.json({ success: false });
   }
+
+  const audioUrl = await resolveSoundCloud(q);
+  return res.json({
+    success: true,
+    mode: 'music',
+    title: q,
+    artist: 'SoundCloud',
+    url: `https://${req.get('host')}/proxy?url=${encodeURIComponent(audioUrl)}`
+  });
 });
 
-/* ======================================================
-   PROXY – ESP32 SAFE (NO CHUNKED)
-   ====================================================== */
+/* ================= PROXY – FIX CDN ================= */
 app.get('/proxy', (req, res) => {
   const target = req.query.url;
   if (!target) return res.end();
@@ -128,23 +108,29 @@ app.get('/proxy', (req, res) => {
   const u = new URL(target);
   const lib = u.protocol === 'http:' ? http : https;
 
-  const headers = {};
+  const headers = {
+    // 🔥 BẮT BUỘC
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    'Accept': '*/*',
+    'Connection': 'keep-alive'
+  };
+
   if (req.headers.range) headers.Range = req.headers.range;
 
   const upstream = lib.get({
     hostname: u.hostname,
     path: u.pathname + u.search,
-    headers
+    headers,
+    keepAlive: true
   }, r => {
 
     if ([301,302,303,307].includes(r.statusCode)) {
       return res.redirect(r.headers.location);
     }
 
-    // ❌ QUAN TRỌNG: TẮT CHUNKED
+    // ❌ Không chunked
     res.removeHeader('Transfer-Encoding');
 
-    // Forward headers an toàn cho ESP32
     if (r.headers['content-length']) {
       res.setHeader('Content-Length', r.headers['content-length']);
     }
@@ -152,16 +138,19 @@ app.get('/proxy', (req, res) => {
       res.setHeader('Content-Range', r.headers['content-range']);
     }
 
+    res.statusCode = r.statusCode;
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Accept-Ranges', 'bytes');
-    res.statusCode = r.statusCode;
 
     r.pipe(res, { end: true });
   });
 
-  upstream.on('error', () => res.end());
+  upstream.on('error', err => {
+    console.error('Proxy error:', err.message);
+    res.end();
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 ULTRA SERVER V10.2.1 running on ${PORT}`);
+  console.log(`🚀 ULTRA SERVER V10.2.2 running on ${PORT}`);
 });
