@@ -1,12 +1,11 @@
 /**
- * 🔥 ULTRA SERVER V10.1 – ESP32 SAFE AUDIO STREAM
+ * 🔥 ULTRA SERVER V10.2 – RANDOM PODCAST ENGINE
  *
- * FIXED:
- *  - ❌ Không trả m3u8 / HLS
- *  - ❌ Không FFmpeg
- *  - ✅ Podcast phát như nhạc
- *  - ✅ yt-dlp ép audio thô (mp3/opus)
- *  - ✅ Proxy HTTP Range
+ * ✔ Random podcast mỗi lần phát
+ * ✔ Không lặp tập liền nhau
+ * ✔ FIX m3u8 / HLS triệt để
+ * ✔ KHÔNG FFmpeg
+ * ✔ ESP32 friendly (Range support)
  */
 
 const express = require('express');
@@ -22,16 +21,19 @@ app.use(cors());
 const PORT = process.env.PORT || 10000;
 const YTDLP_PATH = './yt-dlp';
 
-// RSS Podcast (chỉ dùng làm metadata)
+// RSS Podcast Giang Ơi (chỉ dùng metadata)
 const GIANGOI_RSS =
   'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-// Cache nhẹ: tránh gọi yt-dlp liên tục
+// Cache audio URL (giảm gọi yt-dlp)
 const audioCache = new Map();
 const CACHE_TTL = 60 * 60 * 1000; // 1 giờ
 
+// Nhớ tập podcast lần trước để tránh lặp
+let lastPodcastTitle = null;
+
 app.get('/', (req, res) => {
-  res.send('🔥 ULTRA SERVER V10.1 READY (NO M3U8)');
+  res.send('🔥 ULTRA SERVER V10.2 READY (RANDOM PODCAST)');
 });
 
 /* ======================================================
@@ -40,7 +42,6 @@ app.get('/', (req, res) => {
 function resolveSoundCloud(query) {
   return new Promise((resolve, reject) => {
 
-    // Cache
     const cached = audioCache.get(query);
     if (cached && cached.expire > Date.now()) {
       return resolve(cached.url);
@@ -48,10 +49,8 @@ function resolveSoundCloud(query) {
 
     const yt = spawn(YTDLP_PATH, [
       `scsearch1:${query}`,
-
-      // 🔥 CẤM m3u8 / HLS – Ưu tiên mp3
+      // ❌ CẤM m3u8 / HLS – ưu tiên mp3
       '-f', 'ba[ext=mp3]/ba[protocol!=m3u8]/ba',
-
       '--no-playlist',
       '--no-warnings',
       '-g'
@@ -63,9 +62,8 @@ function resolveSoundCloud(query) {
     yt.on('close', code => {
       const url = out.trim().split('\n')[0];
 
-      // 🚨 BẮT BUỘC: không cho m3u8 lọt qua
       if (!url || url.includes('.m3u8')) {
-        return reject(new Error('Resolved HLS/m3u8 – rejected'));
+        return reject(new Error('HLS/m3u8 rejected'));
       }
 
       if (code === 0 && url) {
@@ -82,7 +80,7 @@ function resolveSoundCloud(query) {
 }
 
 /* ======================================================
-   2. SEARCH API – MUSIC + PODCAST
+   2. SEARCH API – MUSIC + PODCAST (RANDOM)
    ====================================================== */
 app.get('/search', async (req, res) => {
   const q = (req.query.q || '').toLowerCase();
@@ -90,22 +88,32 @@ app.get('/search', async (req, res) => {
 
   /* ---------- PODCAST MODE ---------- */
   if (q.includes('cmd:podcast') || q.includes('giang oi')) {
-    console.log('🎙 PODCAST MODE');
+    console.log('🎙 PODCAST MODE (RANDOM)');
 
     let title = null;
 
-    // 1️⃣ RSS → lấy title mới nhất
     try {
       const feed = await parser.parseURL(GIANGOI_RSS);
-      if (feed.items && feed.items.length > 0) {
-        title = feed.items[0].title;
-        console.log(`📻 RSS title: ${title}`);
+
+      const items = feed.items
+        .filter(i => i && i.title)
+        .slice(0, 30); // Random trong 30 tập gần nhất
+
+      if (items.length > 0) {
+        let pick;
+        do {
+          pick = items[Math.floor(Math.random() * items.length)];
+        } while (items.length > 1 && pick.title === lastPodcastTitle);
+
+        lastPodcastTitle = pick.title;
+        title = pick.title;
+
+        console.log(`🎲 Picked podcast: ${title}`);
       }
     } catch (e) {
-      console.warn('⚠️ RSS failed, fallback to keyword');
+      console.warn('⚠️ RSS failed, fallback keyword');
     }
 
-    // 2️⃣ RSS fail → fallback keyword
     if (!title) {
       title = 'Giang Oi Radio Podcast';
     }
@@ -171,7 +179,6 @@ function proxyStream(targetUrl, clientReq, clientRes) {
     headers
   }, stream => {
 
-    // Redirect follow (SoundCloud hay dùng)
     if ([301, 302, 303, 307].includes(stream.statusCode)) {
       return proxyStream(stream.headers.location, clientReq, clientRes);
     }
@@ -204,5 +211,5 @@ app.get('/proxy', (req, res) => {
    4. START SERVER
    ====================================================== */
 app.listen(PORT, () => {
-  console.log(`🚀 ULTRA SERVER V10.1 running on port ${PORT}`);
+  console.log(`🚀 ULTRA SERVER V10.2 running on port ${PORT}`);
 });
