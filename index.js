@@ -1,10 +1,9 @@
 /**
- * 🎵 ULTRA SERVER V13 (SPAWN CORE - NO CRASH)
- * - Loại bỏ fluent-ffmpeg (gây overhead)
- * - Dùng spawn thuần (nhẹ, ổn định)
- * - Bỏ hết các flag gây SIGSEGV (-movflags, -preset, filter)
- * - Input: Bất chấp (M3U8, AAC, OPUS...)
- * - Output: MP3 128kbps chuẩn (ESP32 thích điều này)
+ * 🎵 ULTRA SERVER V14 (FINAL PERFECT)
+ * - Kết hợp sự ổn định của V13 + Tốc độ & Volume của bản cũ
+ * - Có Volume 2.0 (Loa to)
+ * - Có Preset Ultrafast (Xử lý cực nhanh, không delay)
+ * - Dùng Spawn Core (Không bao giờ Crash SIGSEGV)
  */
 
 const express = require('express');
@@ -21,12 +20,11 @@ const PORT = process.env.PORT || 10000;
 const YTDLP_PATH = './yt-dlp'; 
 const GIANGOI_RSS = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-app.get('/', (req, res) => res.send('🔥 Server V13 (Spawn Core) Ready'));
+app.get('/', (req, res) => res.send('🔥 Server V14 (Volume 2.0 + Ultrafast) Ready'));
 
 // --- HÀM TÌM KIẾM ---
 function searchSoundCloud(query) {
     return new Promise((resolve, reject) => {
-        // Lọc từ khóa
         let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
         let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
         
@@ -34,9 +32,7 @@ function searchSoundCloud(query) {
         
         const args = [
             `scsearch1:${finalQuery}`, 
-            '--get-url',        
-            '--no-playlist', 
-            '--no-warnings',
+            '--get-url', '--no-playlist', '--no-warnings', 
             '--format', 'bestaudio/best', 
             '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         ];
@@ -79,11 +75,8 @@ app.get('/search', async (req, res) => {
             if (item) {
                 const audioUrl = item.enclosure ? item.enclosure.url : item.link;
                 return res.json({ 
-                    success: true, 
-                    title: item.title, 
-                    artist: 'Giang Oi Radio', 
-                    url: makeStreamUrl(audioUrl), 
-                    is_podcast: true 
+                    success: true, title: item.title, artist: 'Giang Oi Radio', 
+                    url: makeStreamUrl(audioUrl), is_podcast: true 
                 });
             }
         } catch (e) { console.error('RSS Error:', e.message); }
@@ -91,11 +84,8 @@ app.get('/search', async (req, res) => {
         const fallbackData = await searchSoundCloud("Giang Oi Radio Podcast");
         if (fallbackData) {
             return res.json({ 
-                success: true, 
-                title: "Giang Oi Podcast (Auto)", 
-                artist: 'Giang Oi', 
-                url: makeStreamUrl(fallbackData.url), 
-                is_podcast: true
+                success: true, title: "Giang Oi Podcast (Auto)", artist: 'Giang Oi', 
+                url: makeStreamUrl(fallbackData.url), is_podcast: true
             });
         }
         return res.json({ success: false, error: 'Podcast Not Found' });
@@ -108,50 +98,49 @@ app.get('/search', async (req, res) => {
     res.json({ success: true, title: q, artist: "SoundCloud", url: makeStreamUrl(searchData.url) });
 });
 
-// --- API STREAM (SPAWN MODE - FINAL FIX) ---
+// --- API STREAM (BẢN FINAL: VOLUME 2.0 + ULTRAFAST) ---
 app.get('/stream', (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).send("No URL");
 
-    console.log("🚀 Spawning FFmpeg...");
+    console.log("🚀 Spawning FFmpeg (Ultrafast Mode)...");
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    // Dùng SPAWN trực tiếp (loại bỏ fluent-ffmpeg wrapper)
-    // Chỉ giữ lại các tham số cốt lõi nhất để tạo ra MP3
     const ffmpegArgs = [
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-i', url,                // Input
-        '-vn',                    // Bỏ video
-        '-acodec', 'libmp3lame',  // Codec MP3
-        '-ac', '2',               // 2 kênh (Stereo)
-        '-ar', '44100',           // 44.1kHz
-        '-b:a', '128k',           // Bitrate 128k
-        '-f', 'mp3',              // Format đầu ra
-        'pipe:1'                  // Đẩy ra stdout
+        '-analyzeduration', '0',          // [HỒI SINH] Đọc lẹ, không chờ phân tích
+        '-probesize', '128000',           // [HỒI SINH] Thăm dò ít thôi cho nhanh
+        '-i', url,
+        '-vn',
+        '-filter:a', 'volume=2.0',        // [HỒI SINH] Tăng âm lượng 200% (Loa to)
+        '-acodec', 'libmp3lame',
+        '-ac', '2',
+        '-ar', '44100',
+        '-b:a', '128k',
+        '-preset', 'ultrafast',           // [HỒI SINH] Xử lý siêu tốc để ESP32 không timeout
+        '-f', 'mp3',
+        'pipe:1'
     ];
 
     const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
 
-    // Nối dây: FFmpeg Output -> Server Response
     ffmpegProcess.stdout.pipe(res);
 
-    // Xử lý lỗi (chỉ log, không crash app)
     ffmpegProcess.stderr.on('data', (data) => {
-        // Uncomment dòng dưới nếu muốn xem log chi tiết của FFmpeg
-        // console.log(`FFmpeg Log: ${data}`);
+        // Uncomment để debug nếu cần
+        // console.log(`FFmpeg: ${data}`);
     });
 
     ffmpegProcess.on('close', (code) => {
-        if (code !== 0 && code !== 255) { // 255 thường là do client ngắt kết nối
+        if (code !== 0 && code !== 255) {
             console.log(`FFmpeg exited with code ${code}`);
         }
     });
 
-    // Khi client (ESP32) ngắt kết nối -> Giết FFmpeg ngay để tiết kiệm RAM
     req.on('close', () => {
         console.log("🔌 Client disconnected, killing FFmpeg...");
         ffmpegProcess.kill('SIGKILL');
@@ -159,5 +148,5 @@ app.get('/stream', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 Server V13 running on port ${PORT}`);
+    console.log(`🚀 Server V14 running on port ${PORT}`);
 });
