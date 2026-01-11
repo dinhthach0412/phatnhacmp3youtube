@@ -1,18 +1,18 @@
 /**
- * 🎵 ULTRA SERVER V11 (STABILITY FIX)
- * - Fix lỗi FFmpeg SIGSEGV (Crash)
- * - Fix lỗi trả về link gốc thay vì link proxy
- * - Tối ưu buffer cho mạng yếu
+ * 🎵 ULTRA SERVER V12 (HYBRID STABLE)
+ * - Cơ chế: yt-dlp lấy link -> FFmpeg "ăn tạp" convert sang MP3 128kbps
+ * - Fix lỗi Crash SIGSEGV bằng cấu hình FFmpeg chuẩn
+ * - Hỗ trợ Podcast Giang Ơi + SoundCloud Search
  */
 
 const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static'); 
+const ffmpegPath = require('ffmpeg-static'); // Dùng bản static cho chắc ăn
 const Parser = require('rss-parser');
 
-// Cấu hình đường dẫn FFmpeg
+// Cấu hình đường dẫn FFmpeg cứng
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
@@ -21,22 +21,26 @@ app.use(cors());
 
 const PORT = process.env.PORT || 10000;
 const YTDLP_PATH = './yt-dlp'; 
-
 const GIANGOI_RSS = 'https://feeds.soundcloud.com/users/soundcloud:users:302069608/sounds.rss';
 
-app.get('/', (req, res) => res.send('🔥 Server V11 (Stable FFmpeg) Ready'));
+app.get('/', (req, res) => res.send('🔥 Server V12 (Hybrid Stable) Ready'));
 
 // --- HÀM TÌM KIẾM SOUNDCLOUD ---
 function searchSoundCloud(query) {
     return new Promise((resolve, reject) => {
-        console.log(`🔎 Executing yt-dlp for: ${query}`);
+        // Lọc từ khóa rác
+        let cleanQuery = query.toLowerCase().replace(/youtube|zing|mp3|phát nhạc|mở nhạc|bài hát|của/g, "").trim();
+        let finalQuery = cleanQuery.length > 1 ? cleanQuery : query;
+        
+        console.log(`🔎 Executing yt-dlp for: ${finalQuery}`);
         
         const args = [
-            `scsearch1:${query}`, 
+            `scsearch1:${finalQuery}`, 
             '--get-url',        
             '--no-playlist', 
             '--no-warnings',
-            '--format', 'bestaudio/best', // Lấy bản tốt nhất
+            '--format', 'bestaudio/best', 
+            // Fake User-Agent để tránh bị chặn
             '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         ];
 
@@ -52,7 +56,7 @@ function searchSoundCloud(query) {
                 console.log(`✅ Found URL: ${finalUrl}`);
                 resolve({
                     url: finalUrl,
-                    title: query 
+                    title: finalQuery 
                 });
             } else {
                 console.error(`❌ Search Failed. Code: ${code}`);
@@ -62,13 +66,14 @@ function searchSoundCloud(query) {
     });
 }
 
-// --- API TÌM KIẾM ---
+// --- API TÌM KIẾM (TRẢ VỀ LINK STREAM CỦA SERVER) ---
 app.get('/search', async (req, res) => {
     const q = (req.query.q || '').toLowerCase();
-    const host = req.get('host'); // Lấy domain hiện tại (ví dụ: phatnhacmp3youtube.onrender.com)
+    const host = req.get('host'); 
     const protocol = req.protocol === 'http' && host.includes('localhost') ? 'http' : 'https';
     
-    // Hàm tạo link stream qua proxy của mình
+    // Hàm tạo link stream nội bộ
+    // ESP32 sẽ gọi vào link này -> Server chạy FFmpeg -> Trả về MP3
     const makeStreamUrl = (targetUrl) => {
         return `${protocol}://${host}/stream?url=${encodeURIComponent(targetUrl)}`;
     };
@@ -78,39 +83,31 @@ app.get('/search', async (req, res) => {
     // --- 1. XỬ LÝ PODCAST ---
     if (q.includes('cmd:podcast') || q.includes('giang oi')) {
         console.log("🎙 Mode: PODCAST");
-        
         try {
             const feed = await parser.parseURL(GIANGOI_RSS);
             const item = feed.items[0]; 
             if (item) {
                 const audioUrl = item.enclosure ? item.enclosure.url : item.link;
-                console.log(`✅ RSS Success: ${item.title}`);
-                
                 return res.json({ 
                     success: true, 
                     title: item.title, 
                     artist: 'Giang Oi Radio', 
-                    url: makeStreamUrl(audioUrl), // [QUAN TRỌNG] Luôn dùng link proxy
+                    url: makeStreamUrl(audioUrl), // Qua FFmpeg
                     is_podcast: true 
                 });
             }
-        } catch (e) {
-            console.error('⚠️ RSS Failed:', e.message);
-        }
+        } catch (e) { console.error('RSS Error:', e.message); }
 
-        console.log("🔄 Fallback: Searching SoundCloud...");
         const fallbackData = await searchSoundCloud("Giang Oi Radio Podcast");
-        
         if (fallbackData) {
             return res.json({ 
                 success: true, 
                 title: "Giang Oi Podcast (Auto)", 
                 artist: 'Giang Oi', 
-                url: makeStreamUrl(fallbackData.url), // [QUAN TRỌNG]
+                url: makeStreamUrl(fallbackData.url), // Qua FFmpeg
                 is_podcast: true
             });
         }
-
         return res.json({ success: false, error: 'Podcast Not Found' });
     }
 
@@ -122,16 +119,16 @@ app.get('/search', async (req, res) => {
         success: true, 
         title: q, 
         artist: "SoundCloud", 
-        url: makeStreamUrl(searchData.url) // [QUAN TRỌNG]
+        url: makeStreamUrl(searchData.url) // Qua FFmpeg
     });
 });
 
-// --- API STREAM (CẤU HÌNH FFMPEG AN TOÀN) ---
+// --- API STREAM (FFMPEG "ĂN TẠP" - BẢN ỔN ĐỊNH) ---
 app.get('/stream', (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).send("No URL");
 
-    console.log("🚀 Streaming...");
+    console.log("🚀 Transcoding Stream...");
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
@@ -141,24 +138,21 @@ app.get('/stream', (req, res) => {
             '-reconnect 1', 
             '-reconnect_streamed 1', 
             '-reconnect_delay_max 5',
-            // [FIX CRASH] Tăng analyzeduration lên một chút để FFmpeg nhận diện luồng tốt hơn
-            // Thay vì 0 (quá gắt), ta để 500000 (0.5s)
-            '-analyzeduration 1000000', 
-            '-probesize 1000000',
+            // Cấu hình an toàn: Không ép probesize quá nhỏ để tránh Crash với M3U8 lạ
+            '-probesize 128000', 
             '-user_agent "Mozilla/5.0"'
         ])
-        .audioFilters(['volume=1.5']) // Giảm volume boost chút cho đỡ vỡ tiếng
+        .audioFilters(['volume=1.5']) 
         .audioCodec('libmp3lame')      
-        .audioBitrate(128)            
-        .audioChannels(2) // [FIX] Chuyển về Stereo (2 kênh) chuẩn MP3              
+        .audioBitrate(128)   // 128k là chuẩn, nghe hay hơn 64k         
+        .audioChannels(2)    // Stereo          
         .audioFrequency(44100)        
         .format('mp3')                
         .outputOptions([
             '-vn', '-map_metadata', '-1',
             '-id3v2_version', '0', 
             '-flush_packets', '1',        
-            // [FIX CRASH] Dùng preset 'veryfast' thay vì 'ultrafast' để ổn định hơn
-            '-preset', 'veryfast',       
+            '-preset', 'veryfast',  // veryfast ổn định hơn ultrafast trên Render     
             '-movflags', 'frag_keyframe+empty_moov'
         ])
         .on('error', (err) => {
@@ -170,5 +164,5 @@ app.get('/stream', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 Server V11 running on port ${PORT}`);
+    console.log(`🚀 Server V12 running on port ${PORT}`);
 });
